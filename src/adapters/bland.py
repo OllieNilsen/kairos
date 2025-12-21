@@ -1,0 +1,77 @@
+"""Bland AI voice client adapter."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+import httpx
+
+if TYPE_CHECKING:
+    from src.core.models import TriggerPayload
+
+
+class BlandClient:
+    """Client for Bland AI voice API."""
+
+    BASE_URL = "https://api.bland.ai/v1"
+    TIMEOUT = 30.0
+
+    def __init__(self, api_key: str) -> None:
+        self.api_key = api_key
+        self._client: httpx.AsyncClient | None = None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient(
+                base_url=self.BASE_URL,
+                headers={
+                    "Authorization": self.api_key,
+                    "Content-Type": "application/json",
+                },
+                timeout=self.TIMEOUT,
+            )
+        return self._client
+
+    async def initiate_call(
+        self,
+        payload: TriggerPayload,
+        system_prompt: str,
+        webhook_url: str,
+    ) -> str:
+        """Initiate an outbound voice call.
+
+        Args:
+            payload: The trigger payload with phone and context
+            system_prompt: The system prompt for the voice agent
+            webhook_url: URL for Bland to call when the call ends
+
+        Returns:
+            The call_id from Bland AI
+
+        Raises:
+            httpx.HTTPStatusError: If the API call fails
+        """
+        client = await self._get_client()
+
+        request_body = {
+            "phone_number": payload.phone_number,
+            "task": system_prompt,
+            "voice": "maya",  # Natural female voice
+            "reduce_latency": True,
+            "webhook": webhook_url,
+            "metadata": {
+                "event_context": payload.event_context.model_dump_json(),
+            },
+        }
+
+        response = await client.post("/calls", json=request_body)
+        response.raise_for_status()
+
+        data: dict[str, str] = response.json()
+        return data["call_id"]
+
+    async def close(self) -> None:
+        """Close the HTTP client."""
+        if self._client:
+            await self._client.aclose()
+            self._client = None

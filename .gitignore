@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+.eggs/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# CDK
+cdk.out/
+.cdk.staging/
+*.js
+!cdk/cdk.json
+
+# Lambda Layer
+layer/
+
+# Testing
+.coverage
+.pytest_cache/
+htmlcov/
+.mypy_cache/
+
+# Environment
+.env
+.env.local
+*.pem
+
+# Logs
+*.log
+
