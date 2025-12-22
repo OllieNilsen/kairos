@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import httpx
 
 if TYPE_CHECKING:
-    from src.core.models import TriggerPayload
+    from core.models import TriggerPayload
 
 
 class BlandClient:

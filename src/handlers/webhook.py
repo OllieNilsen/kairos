@@ -9,11 +9,11 @@ from typing import TYPE_CHECKING, Any
 from aws_lambda_powertools import Logger
 from pydantic import ValidationError
 
-from src.adapters.anthropic_client import AnthropicSummarizer
-from src.adapters.sns import SNSPublisher
-from src.adapters.ssm import get_parameter
-from src.core.models import BlandWebhookPayload, EventContext
-from src.core.prompts import build_summarization_prompt
+from adapters.anthropic_client import AnthropicSummarizer
+from adapters.sns import SNSPublisher
+from adapters.ssm import get_parameter
+from core.models import BlandWebhookPayload, EventContext
+from core.prompts import build_summarization_prompt
 
 if TYPE_CHECKING:
     from aws_lambda_powertools.utilities.typing import LambdaContext

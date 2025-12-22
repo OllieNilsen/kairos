@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from src.core.models import EventContext
+    from core.models import EventContext
 
 
 def build_debrief_system_prompt(context: EventContext, prompts: list[str]) -> str:
