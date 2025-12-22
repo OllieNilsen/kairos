@@ -10,7 +10,7 @@ from aws_lambda_powertools import Logger
 from pydantic import ValidationError
 
 from adapters.anthropic_client import AnthropicSummarizer
-from adapters.sns import SNSPublisher
+from adapters.ses import SESPublisher
 from adapters.ssm import get_parameter
 from core.models import BlandWebhookPayload, EventContext
 from core.prompts import build_summarization_prompt
@@ -22,7 +22,7 @@ logger = Logger(service="kairos-webhook")
 
 # Lazy initialization for cold start optimization
 _anthropic: AnthropicSummarizer | None = None
-_sns: SNSPublisher | None = None
+_ses: SESPublisher | None = None
 
 
 def get_anthropic() -> AnthropicSummarizer:
@@ -35,13 +35,13 @@ def get_anthropic() -> AnthropicSummarizer:
     return _anthropic
 
 
-def get_sns() -> SNSPublisher:
-    """Get or create the SNS publisher."""
-    global _sns
-    if _sns is None:
-        topic_arn = os.environ["SNS_TOPIC_ARN"]
-        _sns = SNSPublisher(topic_arn)
-    return _sns
+def get_ses() -> SESPublisher:
+    """Get or create the SES publisher."""
+    global _ses
+    if _ses is None:
+        sender_email = os.environ["SENDER_EMAIL"]
+        _ses = SESPublisher(sender_email)
+    return _ses
 
 
 @logger.inject_lambda_context
@@ -90,15 +90,17 @@ def handler(event: dict[str, Any], context: LambdaContext) -> dict[str, Any]:
         system_prompt="You are a concise summarizer. Output only the summary, no preamble.",
         user_prompt=summarization_prompt,
     )
-    logger.info("Generated summary", extra={"length": len(summary)})
+    logger.info("Generated summary", extra={"length": len(summary), "summary": summary})
 
-    # Send SMS notification
-    sns = get_sns()
-    message_id = sns.send_sms(
-        message=summary[:300],  # SMS length limit
-        phone_number=payload.to,
+    # Send email notification
+    ses = get_ses()
+    recipient_email = os.environ["RECIPIENT_EMAIL"]
+    message_id = ses.send_email(
+        to_email=recipient_email,
+        subject=f"Kairos Debrief: {event_context.subject}",
+        body=summary,
     )
-    logger.info("Sent SMS", extra={"message_id": message_id})
+    logger.info("Sent email", extra={"message_id": message_id})
 
     return {
         "statusCode": 200,
