@@ -40,6 +40,10 @@ htmlcov/
 *.pem
 *api-key.txt
 
+# Google OAuth secrets
+gcp_client_secret.json
+*_client_secret*.json
+
 # Logs
 *.log
 
