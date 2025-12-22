@@ -84,6 +84,14 @@ class KairosStack(Stack):
         )
         sms_topic.grant_publish(webhook_fn)
 
+        # Grant direct SMS publish permission (phone numbers aren't ARNs, so resource is *)
+        webhook_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["sns:Publish"],
+                resources=["*"],  # Required for direct SMS to phone numbers
+            )
+        )
+
         # Grant SSM read access for Anthropic API key
         webhook_fn.add_to_role_policy(
             iam.PolicyStatement(
