@@ -38,6 +38,7 @@ htmlcov/
 .env
 .env.local
 *.pem
+*api-key.txt
 
 # Logs
 *.log

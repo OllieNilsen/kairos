@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 class SNSPublisher:
     """Publisher for AWS SNS SMS messages."""
 
-    def __init__(self, topic_arn: str, region: str = "us-east-1") -> None:
+    def __init__(self, topic_arn: str, region: str = "eu-west-1") -> None:
         self.topic_arn = topic_arn
         self.client: SNSClient = boto3.client("sns", region_name=region)
 

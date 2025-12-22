@@ -12,7 +12,7 @@ KairosStack(
     "KairosStack",
     env=cdk.Environment(
         account=cdk.Aws.ACCOUNT_ID,
-        region="us-east-1",
+        region="eu-west-1",
     ),
     description="Kairos Chief of Staff - Slice 1: Mock Event Debrief",
 )

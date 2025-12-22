@@ -10,6 +10,7 @@ from aws_lambda_powertools import Logger
 from pydantic import ValidationError
 
 from src.adapters.bland import BlandClient
+from src.adapters.ssm import get_parameter
 from src.core.models import TriggerPayload, TriggerResponse
 from src.core.prompts import build_debrief_system_prompt
 
@@ -26,7 +27,8 @@ def get_bland_client() -> BlandClient:
     """Get or create the Bland AI client."""
     global _bland_client
     if _bland_client is None:
-        api_key = os.environ["BLAND_API_KEY"]
+        ssm_param_name = os.environ["SSM_BLAND_API_KEY"]
+        api_key = get_parameter(ssm_param_name)
         _bland_client = BlandClient(api_key)
     return _bland_client
 

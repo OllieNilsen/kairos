@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from src.adapters.anthropic_client import AnthropicSummarizer
 from src.adapters.sns import SNSPublisher
+from src.adapters.ssm import get_parameter
 from src.core.models import BlandWebhookPayload, EventContext
 from src.core.prompts import build_summarization_prompt
 
@@ -28,7 +29,8 @@ def get_anthropic() -> AnthropicSummarizer:
     """Get or create the Anthropic client."""
     global _anthropic
     if _anthropic is None:
-        api_key = os.environ["ANTHROPIC_API_KEY"]
+        ssm_param_name = os.environ["SSM_ANTHROPIC_API_KEY"]
+        api_key = get_parameter(ssm_param_name)
         _anthropic = AnthropicSummarizer(api_key)
     return _anthropic
 

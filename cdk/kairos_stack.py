@@ -5,14 +5,19 @@ from pathlib import Path
 import aws_cdk as cdk
 from aws_cdk import (
     Duration,
-    RemovalPolicy,
     Stack,
+    aws_iam as iam,
     aws_lambda as lambda_,
     aws_logs as logs,
     aws_sns as sns,
     aws_ssm as ssm,
 )
 from constructs import Construct
+
+# SSM Parameter names (stored as SecureString)
+SSM_BLAND_API_KEY = "/kairos/bland-api-key"
+SSM_ANTHROPIC_API_KEY = "/kairos/anthropic-api-key"
+SSM_MY_PHONE = "/kairos/my-phone-number"
 
 
 class KairosStack(Stack):
@@ -21,15 +26,9 @@ class KairosStack(Stack):
     def __init__(self, scope: Construct, id: str, **kwargs) -> None:
         super().__init__(scope, id, **kwargs)
 
-        # === SSM Parameter References ===
-        bland_api_key = ssm.StringParameter.value_for_string_parameter(
-            self, "/kairos/bland-api-key"
-        )
-        anthropic_api_key = ssm.StringParameter.value_for_string_parameter(
-            self, "/kairos/anthropic-api-key"
-        )
+        # === SSM Parameter References (for phone number only - not a secret) ===
         my_phone = ssm.StringParameter.value_for_string_parameter(
-            self, "/kairos/my-phone-number"
+            self, SSM_MY_PHONE
         )
 
         # === SNS Topic for SMS ===
@@ -77,13 +76,23 @@ class KairosStack(Stack):
             code=lambda_.Code.from_asset(src_path),
             handler="handlers.webhook.handler",
             environment={
-                "ANTHROPIC_API_KEY": anthropic_api_key,
+                "SSM_ANTHROPIC_API_KEY": SSM_ANTHROPIC_API_KEY,
                 "SNS_TOPIC_ARN": sms_topic.topic_arn,
                 "POWERTOOLS_SERVICE_NAME": "kairos-webhook",
             },
             **common_lambda_props,
         )
         sms_topic.grant_publish(webhook_fn)
+
+        # Grant SSM read access for Anthropic API key
+        webhook_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["ssm:GetParameter"],
+                resources=[
+                    f"arn:aws:ssm:{self.region}:{self.account}:parameter{SSM_ANTHROPIC_API_KEY}"
+                ],
+            )
+        )
 
         webhook_url = webhook_fn.add_function_url(
             auth_type=lambda_.FunctionUrlAuthType.NONE,
@@ -101,11 +110,21 @@ class KairosStack(Stack):
             code=lambda_.Code.from_asset(src_path),
             handler="handlers.trigger.handler",
             environment={
-                "BLAND_API_KEY": bland_api_key,
+                "SSM_BLAND_API_KEY": SSM_BLAND_API_KEY,
                 "WEBHOOK_URL": webhook_url.url,
                 "POWERTOOLS_SERVICE_NAME": "kairos-trigger",
             },
             **common_lambda_props,
+        )
+
+        # Grant SSM read access for Bland API key
+        trigger_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["ssm:GetParameter"],
+                resources=[
+                    f"arn:aws:ssm:{self.region}:{self.account}:parameter{SSM_BLAND_API_KEY}"
+                ],
+            )
         )
 
         trigger_url = trigger_fn.add_function_url(
