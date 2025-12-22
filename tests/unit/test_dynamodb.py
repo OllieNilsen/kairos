@@ -75,4 +75,3 @@ class TestCallDeduplicator:
         assert "processed_at" in item
         assert "ttl" in item
         assert isinstance(item["ttl"], int)
-

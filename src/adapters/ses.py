@@ -37,4 +37,3 @@ class SESPublisher:
             },
         )
         return response["MessageId"]
-

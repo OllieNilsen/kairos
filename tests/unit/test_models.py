@@ -143,9 +143,7 @@ class TestBlandWebhookPayload:
                 "call_id": "test",
                 "status": "completed",
                 "variables": {
-                    "metadata": {
-                        "event_context": '{"event_type": "general", "subject": "Test"}'
-                    }
+                    "metadata": {"event_context": '{"event_type": "general", "subject": "Test"}'}
                 },
             }
         )

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import boto3
 from botocore.exceptions import ClientError
@@ -32,8 +32,8 @@ class CallDeduplicator:
             self.table.put_item(
                 Item={
                     "call_id": call_id,
-                    "processed_at": datetime.now(timezone.utc).isoformat(),
-                    "ttl": int(datetime.now(timezone.utc).timestamp()) + 86400 * 7,  # 7 days
+                    "processed_at": datetime.now(UTC).isoformat(),
+                    "ttl": int(datetime.now(UTC).timestamp()) + 86400 * 7,  # 7 days
                 },
                 ConditionExpression="attribute_not_exists(call_id)",
             )
@@ -45,4 +45,3 @@ class CallDeduplicator:
                 return True
             # Some other error - re-raise
             raise
-

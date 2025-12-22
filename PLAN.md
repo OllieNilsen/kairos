@@ -11,7 +11,8 @@ sequenceDiagram
     participant Phone as User Phone
     participant WebhookLambda as Webhook Lambda
     participant Anthropic as Anthropic API
-    participant SNS as AWS SNS
+    participant DynamoDB as DynamoDB
+    participant SES as AWS SES
 
     User->>TriggerLambda: POST /trigger (JSON payload)
     TriggerLambda->>TriggerLambda: Validate payload (Pydantic)
@@ -27,12 +28,14 @@ sequenceDiagram
     
     BlandAI->>WebhookLambda: POST /webhook (call_ended event)
     WebhookLambda->>WebhookLambda: Validate webhook (Pydantic)
+    WebhookLambda->>DynamoDB: Check/Mark call_id (dedup)
+    DynamoDB-->>WebhookLambda: OK (not duplicate)
     WebhookLambda->>SSM: GetParameter (Anthropic API key)
     SSM-->>WebhookLambda: API key (cached)
     WebhookLambda->>Anthropic: POST /messages (summarize)
     Anthropic-->>WebhookLambda: Summary text
-    WebhookLambda->>SNS: Publish summary
-    SNS->>Phone: SMS Notification
+    WebhookLambda->>SES: Send email summary
+    SES->>User: Email Notification
     WebhookLambda-->>BlandAI: 200 OK
 ```
 
@@ -45,6 +48,9 @@ sequenceDiagram
 | IaC | AWS CDK (Python) |
 | Runtime | Python 3.12 / ARM64 |
 | Secrets | AWS SSM Parameter Store (SecureString, fetched at runtime) |
+| Notification | AWS SES (email) - SMS planned for later |
+| Deduplication | DynamoDB (conditional writes with TTL) |
+| Monitoring | CloudWatch Alarms → SNS email alerts |
 
 ## Project Structure
 
@@ -61,13 +67,15 @@ kairos/
 │   ├── adapters/                 # External service integrations
 │   │   ├── bland.py              # Bland AI client
 │   │   ├── anthropic_client.py   # Anthropic API client
-│   │   ├── sns.py                # SNS publisher
-│   │   └── ssm.py                # SSM Parameter Store (secrets)
+│   │   ├── sns.py                # SNS publisher (reserved for SMS)
+│   │   ├── ses.py                # SES email publisher
+│   │   ├── ssm.py                # SSM Parameter Store (secrets)
+│   │   └── dynamodb.py           # DynamoDB deduplicator
 │   └── handlers/                 # Lambda entry points
 │       ├── trigger.py            # POST /trigger handler
 │       └── webhook.py            # POST /webhook handler
 ├── tests/
-│   └── unit/                     # Unit tests (13 tests)
+│   └── unit/                     # Unit tests (36 tests)
 ├── pyproject.toml                # Dependencies
 └── Makefile                      # Build commands
 ```
@@ -133,33 +141,17 @@ kairos/
 - [x] Deploy: `make deploy`
 - [x] Note the Function URLs from CloudFormation outputs
 
-### Phase 3: End-to-End Test ⏳ IN PROGRESS
-- [ ] Test trigger endpoint:
-  ```bash
-  curl -X POST https://YOUR_TRIGGER_URL/ \
-    -H "Content-Type: application/json" \
-    -d '{
-      "phone_number": "+1YOUR_PHONE",
-      "event_context": {
-        "event_type": "meeting_debrief",
-        "subject": "Test Meeting with Sarah",
-        "participants": ["Sarah Chen"]
-      },
-      "interview_prompts": [
-        "What was discussed?",
-        "Any follow-ups?"
-      ]
-    }'
-  ```
-- [ ] Answer the phone call
-- [ ] Complete the debrief conversation
-- [ ] Verify SMS summary received
+### Phase 3: End-to-End Test ✅ COMPLETE
+- [x] Test trigger endpoint
+- [x] Answer the phone call
+- [x] Complete the debrief conversation
+- [x] Verify email summary received (using SES for MVP)
 
-### Phase 4: Hardening (Optional)
-- [ ] Add Bland webhook signature validation
-- [ ] Add DynamoDB for call_id deduplication
-- [ ] Add CloudWatch Alarms for errors
-- [ ] Add structured logging correlation IDs
+### Phase 4: Hardening ✅ COMPLETE
+- [x] Add DynamoDB for call_id deduplication (with TTL auto-cleanup)
+- [x] Add CloudWatch Alarms for Lambda errors → SNS email alerts
+- [ ] Add Bland webhook signature validation (pending Bland API docs)
+- [ ] Add SNS SMS as alternative to SES email (pending sandbox exit)
 
 ## Deployed Resources
 
@@ -167,8 +159,10 @@ kairos/
 |----------|----------|
 | Trigger Lambda | `kairos-trigger` |
 | Webhook Lambda | `kairos-webhook` |
-| SNS Topic | `KairosSMSTopic` |
+| DynamoDB Table | `kairos-call-dedup` |
+| SNS Alarm Topic | `KairosAlarmTopic` |
 | Lambda Layer | `KairosDepsLayer` |
+| CloudWatch Alarms | `TriggerErrorAlarm`, `WebhookErrorAlarm` |
 
 **Function URLs:** (get from `aws cloudformation describe-stacks --stack-name KairosStack`)
 - TriggerUrl: `https://xxx.lambda-url.REGION.on.aws/`
@@ -190,8 +184,10 @@ The SSM adapter (`src/adapters/ssm.py`) uses LRU caching to avoid repeated API c
 | Bland AI | ~$0.09/min (est. 3 min = $0.27) |
 | Anthropic | ~$0.003 |
 | Lambda | < $0.001 |
-| SNS SMS | $0.0075 |
-| **Total** | **~$0.28 per debrief** |
+| DynamoDB | < $0.001 |
+| SES Email | < $0.001 |
+| SNS SMS | $0.0075 (when enabled) |
+| **Total** | **~$0.27 per debrief** |
 
 ## Quick Commands
 
