@@ -28,18 +28,54 @@ class TestTriggerPayload:
         assert payload.phone_number == "+15551234567"
         assert payload.event_context.subject == "Q4 Planning"
 
-    def test_invalid_phone_format(self):
-        """Invalid phone number should raise validation error."""
+    # === Phone Number E.164 Validation Tests ===
+
+    @pytest.mark.parametrize(
+        "phone",
+        [
+            "+15551234567",  # US
+            "+447584019464",  # UK
+            "+33612345678",  # France
+            "+491701234567",  # Germany
+            "+81901234567",  # Japan
+            "+8613812345678",  # China (14 digits)
+            "+1234567",  # Minimum 7 digits
+            "+123456789012345",  # Maximum 15 digits
+        ],
+    )
+    def test_valid_international_phone_numbers(self, phone: str):
+        """E.164 international phone numbers should be accepted."""
+        payload = TriggerPayload(
+            phone_number=phone,
+            event_context=EventContext(event_type="general", subject="Test"),
+            interview_prompts=["Question?"],
+        )
+        assert payload.phone_number == phone
+
+    @pytest.mark.parametrize(
+        "phone,reason",
+        [
+            ("555-123-4567", "no country code"),
+            ("5551234567", "missing + prefix"),
+            ("+0123456789", "starts with 0 after +"),
+            ("+123456", "too short (6 digits)"),
+            ("+1234567890123456", "too long (16 digits)"),
+            ("++15551234567", "double +"),
+            ("+1-555-123-4567", "contains dashes"),
+            ("+1 555 123 4567", "contains spaces"),
+            ("+1(555)1234567", "contains parentheses"),
+            ("", "empty string"),
+        ],
+    )
+    def test_invalid_phone_formats(self, phone: str, reason: str):
+        """Invalid phone formats should be rejected."""
         with pytest.raises(ValidationError) as exc_info:
             TriggerPayload(
-                phone_number="555-123-4567",  # Wrong format
-                event_context=EventContext(
-                    event_type="meeting_debrief",
-                    subject="Test",
-                ),
+                phone_number=phone,
+                event_context=EventContext(event_type="general", subject="Test"),
                 interview_prompts=["Question?"],
             )
-        assert "phone_number" in str(exc_info.value)
+        assert "phone_number" in str(exc_info.value), f"Failed for: {reason}"
 
     def test_empty_prompts_rejected(self):
         """At least one prompt is required."""
