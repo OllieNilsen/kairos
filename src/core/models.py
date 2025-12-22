@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -62,3 +63,34 @@ class BlandWebhookPayload(BaseModel):
     variables: dict[str, Any] = Field(default_factory=dict)  # Can be nested
 
     model_config = {"populate_by_name": True, "extra": "ignore"}
+
+
+# === Meeting Models (Slice 2) ===
+
+
+class Meeting(BaseModel):
+    """A calendar meeting synced from Google Calendar."""
+
+    user_id: str
+    meeting_id: str  # Google Calendar event ID
+    title: str
+    start_time: datetime
+    end_time: datetime
+    attendees: list[str] = Field(default_factory=list)
+    status: Literal["pending", "debriefed", "skipped"] = "pending"
+    google_etag: str | None = None  # For sync conflict detection
+    created_at: datetime = Field(default_factory=datetime.now)
+
+    def duration_minutes(self) -> int:
+        """Calculate meeting duration in minutes."""
+        delta = self.end_time - self.start_time
+        return int(delta.total_seconds() / 60)
+
+    def to_event_context(self) -> EventContext:
+        """Convert to EventContext for debrief call."""
+        return EventContext(
+            event_type="meeting_debrief",
+            subject=self.title,
+            participants=self.attendees,
+            duration_minutes=self.duration_minutes(),
+        )

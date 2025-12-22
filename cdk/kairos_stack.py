@@ -24,9 +24,14 @@ SSM_BLAND_WEBHOOK_SECRET = "/kairos/bland-webhook-secret"
 SSM_ANTHROPIC_API_KEY = "/kairos/anthropic-api-key"
 SSM_MY_EMAIL = "/kairos/my-email"
 
+# Slice 2: Google Calendar
+SSM_GOOGLE_CLIENT_ID = "/kairos/google-client-id"
+SSM_GOOGLE_CLIENT_SECRET = "/kairos/google-client-secret"
+SSM_GOOGLE_REFRESH_TOKEN = "/kairos/google-refresh-token"
+
 
 class KairosStack(Stack):
-    """Main infrastructure stack for Kairos Slice 1."""
+    """Main infrastructure stack for Kairos."""
 
     def __init__(self, scope: Construct, id: str, **kwargs) -> None:
         super().__init__(scope, id, **kwargs)
@@ -194,6 +199,79 @@ class KairosStack(Stack):
             ),
         )
 
+        # ========================================
+        # SLICE 2: Google Calendar Integration
+        # ========================================
+
+        # === DynamoDB Table for Meetings ===
+        meetings_table = dynamodb.Table(
+            self,
+            "MeetingsTable",
+            table_name="kairos-meetings",
+            partition_key=dynamodb.Attribute(
+                name="user_id", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="meeting_id", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,  # For dev - change for prod
+            time_to_live_attribute="ttl",
+        )
+
+        # === Calendar Webhook Lambda ===
+        calendar_webhook_fn = lambda_.Function(
+            self,
+            "CalendarWebhookFunction",
+            function_name="kairos-calendar-webhook",
+            code=lambda_.Code.from_asset(src_path),
+            handler="handlers.calendar_webhook.handler",
+            environment={
+                "MEETINGS_TABLE_NAME": meetings_table.table_name,
+                "USER_ID": "default",  # MVP: single user
+                "POWERTOOLS_SERVICE_NAME": "kairos-calendar-webhook",
+            },
+            **common_lambda_props,
+        )
+
+        # Grant DynamoDB access
+        meetings_table.grant_read_write_data(calendar_webhook_fn)
+
+        # Grant SSM read access for Google OAuth credentials
+        calendar_webhook_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["ssm:GetParameter"],
+                resources=[
+                    f"arn:aws:ssm:{self.region}:{self.account}:parameter{SSM_GOOGLE_CLIENT_ID}",
+                    f"arn:aws:ssm:{self.region}:{self.account}:parameter{SSM_GOOGLE_CLIENT_SECRET}",
+                    f"arn:aws:ssm:{self.region}:{self.account}:parameter{SSM_GOOGLE_REFRESH_TOKEN}",
+                ],
+            )
+        )
+
+        # Function URL for Google Calendar push notifications
+        calendar_webhook_url = calendar_webhook_fn.add_function_url(
+            auth_type=lambda_.FunctionUrlAuthType.NONE,
+            cors=lambda_.FunctionUrlCorsOptions(
+                allowed_origins=["*"],
+                allowed_methods=[lambda_.HttpMethod.POST],
+            ),
+        )
+
+        # === CloudWatch Alarm for Calendar Webhook Errors ===
+        calendar_webhook_errors = calendar_webhook_fn.metric_errors(period=Duration.minutes(5))
+        calendar_webhook_alarm = cloudwatch.Alarm(
+            self,
+            "CalendarWebhookErrorAlarm",
+            metric=calendar_webhook_errors,
+            threshold=1,
+            evaluation_periods=1,
+            alarm_description="Kairos calendar webhook Lambda errors",
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+        calendar_webhook_alarm.add_alarm_action(cw_actions.SnsAction(alarm_topic))
+
         # === Outputs ===
         cdk.CfnOutput(
             self,
@@ -206,5 +284,11 @@ class KairosStack(Stack):
             "WebhookUrl",
             value=webhook_url.url,
             description="Webhook URL for Bland AI callbacks",
+        )
+        cdk.CfnOutput(
+            self,
+            "CalendarWebhookUrl",
+            value=calendar_webhook_url.url,
+            description="Webhook URL for Google Calendar push notifications",
         )
 
