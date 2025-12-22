@@ -13,6 +13,7 @@ from adapters.anthropic_client import AnthropicSummarizer
 from adapters.dynamodb import CallDeduplicator
 from adapters.ses import SESPublisher
 from adapters.ssm import get_parameter
+from adapters.webhook_verify import verify_bland_signature
 from core.models import BlandWebhookPayload, EventContext
 from core.prompts import build_summarization_prompt
 
@@ -64,12 +65,29 @@ def handler(event: dict[str, Any], context: LambdaContext) -> dict[str, Any]:
     Expected event format (Lambda Function URL):
     {
         "body": "{...bland webhook payload...}",
+        "headers": {"x-webhook-signature": "..."},
         "requestContext": {...}
     }
     """
+    # Get raw body for signature verification (before JSON parsing)
+    raw_body = event.get("body", "{}")
+
+    # Verify webhook signature (if secret is configured)
+    ssm_webhook_secret = os.environ.get("SSM_BLAND_WEBHOOK_SECRET")
+    if ssm_webhook_secret:
+        webhook_secret = get_parameter(ssm_webhook_secret)
+        headers = event.get("headers", {})
+        signature = headers.get("x-webhook-signature", "")
+
+        if not verify_bland_signature(webhook_secret, raw_body, signature):
+            logger.warning("Invalid webhook signature")
+            return {"statusCode": 401, "body": json.dumps({"error": "Invalid signature"})}
+
+        logger.info("Webhook signature verified")
+
     try:
         # Parse and validate webhook payload
-        body = event.get("body", "{}")
+        body = raw_body
         if isinstance(body, str):
             body = json.loads(body)
 

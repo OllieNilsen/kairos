@@ -20,6 +20,7 @@ from constructs import Construct
 
 # SSM Parameter names (stored as SecureString)
 SSM_BLAND_API_KEY = "/kairos/bland-api-key"
+SSM_BLAND_WEBHOOK_SECRET = "/kairos/bland-webhook-secret"
 SSM_ANTHROPIC_API_KEY = "/kairos/anthropic-api-key"
 SSM_MY_EMAIL = "/kairos/my-email"
 
@@ -93,6 +94,7 @@ class KairosStack(Stack):
             handler="handlers.webhook.handler",
             environment={
                 "SSM_ANTHROPIC_API_KEY": SSM_ANTHROPIC_API_KEY,
+                "SSM_BLAND_WEBHOOK_SECRET": SSM_BLAND_WEBHOOK_SECRET,
                 "SENDER_EMAIL": my_email,  # Must be verified in SES
                 "RECIPIENT_EMAIL": my_email,  # Send to self for MVP
                 "DEDUP_TABLE_NAME": dedup_table.table_name,
@@ -112,12 +114,13 @@ class KairosStack(Stack):
             )
         )
 
-        # Grant SSM read access for Anthropic API key
+        # Grant SSM read access for Anthropic API key and webhook secret
         webhook_fn.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["ssm:GetParameter"],
                 resources=[
-                    f"arn:aws:ssm:{self.region}:{self.account}:parameter{SSM_ANTHROPIC_API_KEY}"
+                    f"arn:aws:ssm:{self.region}:{self.account}:parameter{SSM_ANTHROPIC_API_KEY}",
+                    f"arn:aws:ssm:{self.region}:{self.account}:parameter{SSM_BLAND_WEBHOOK_SECRET}",
                 ],
             )
         )

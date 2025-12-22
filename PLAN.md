@@ -70,12 +70,13 @@ kairos/
 │   │   ├── sns.py                # SNS publisher (reserved for SMS)
 │   │   ├── ses.py                # SES email publisher
 │   │   ├── ssm.py                # SSM Parameter Store (secrets)
-│   │   └── dynamodb.py           # DynamoDB deduplicator
+│   │   ├── dynamodb.py           # DynamoDB deduplicator
+│   │   └── webhook_verify.py     # Bland webhook signature verification
 │   └── handlers/                 # Lambda entry points
 │       ├── trigger.py            # POST /trigger handler
 │       └── webhook.py            # POST /webhook handler
 ├── tests/
-│   └── unit/                     # Unit tests (36 tests)
+│   └── unit/                     # Unit tests (44 tests)
 ├── pyproject.toml                # Dependencies
 └── Makefile                      # Build commands
 ```
@@ -129,7 +130,8 @@ kairos/
   ```bash
   aws ssm put-parameter --name "/kairos/bland-api-key" --value "sk-..." --type SecureString
   aws ssm put-parameter --name "/kairos/anthropic-api-key" --value "sk-ant-..." --type SecureString
-  aws ssm put-parameter --name "/kairos/my-phone-number" --value "+1XXXXXXXXXX" --type String
+  aws ssm put-parameter --name "/kairos/bland-webhook-secret" --value "whsec_..." --type SecureString
+  aws ssm put-parameter --name "/kairos/my-email" --value "you@example.com" --type String
   ```
 
 ### Phase 2: Build & Deploy ✅ COMPLETE
@@ -150,7 +152,7 @@ kairos/
 ### Phase 4: Hardening ✅ COMPLETE
 - [x] Add DynamoDB for call_id deduplication (with TTL auto-cleanup)
 - [x] Add CloudWatch Alarms for Lambda errors → SNS email alerts
-- [ ] Add Bland webhook signature validation (pending Bland API docs)
+- [x] Add Bland webhook HMAC-SHA256 signature verification
 - [ ] Add SNS SMS as alternative to SES email (pending sandbox exit)
 
 ## Deployed Resources
