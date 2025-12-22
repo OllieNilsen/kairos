@@ -6,6 +6,7 @@
 sequenceDiagram
     participant User as User (curl)
     participant TriggerLambda as Trigger Lambda
+    participant SSM as AWS SSM
     participant BlandAI as Bland AI
     participant Phone as User Phone
     participant WebhookLambda as Webhook Lambda
@@ -14,6 +15,8 @@ sequenceDiagram
 
     User->>TriggerLambda: POST /trigger (JSON payload)
     TriggerLambda->>TriggerLambda: Validate payload (Pydantic)
+    TriggerLambda->>SSM: GetParameter (Bland API key)
+    SSM-->>TriggerLambda: API key (cached)
     TriggerLambda->>BlandAI: POST /v1/calls (initiate call)
     BlandAI-->>TriggerLambda: 200 OK (call_id)
     TriggerLambda-->>User: 202 Accepted (call_id)
@@ -24,6 +27,8 @@ sequenceDiagram
     
     BlandAI->>WebhookLambda: POST /webhook (call_ended event)
     WebhookLambda->>WebhookLambda: Validate webhook (Pydantic)
+    WebhookLambda->>SSM: GetParameter (Anthropic API key)
+    SSM-->>WebhookLambda: API key (cached)
     WebhookLambda->>Anthropic: POST /messages (summarize)
     Anthropic-->>WebhookLambda: Summary text
     WebhookLambda->>SNS: Publish summary
@@ -39,6 +44,7 @@ sequenceDiagram
 | LLM | Anthropic API (Claude Sonnet 4) |
 | IaC | AWS CDK (Python) |
 | Runtime | Python 3.12 / ARM64 |
+| Secrets | AWS SSM Parameter Store (SecureString, fetched at runtime) |
 
 ## Project Structure
 
@@ -55,12 +61,13 @@ kairos/
 │   ├── adapters/                 # External service integrations
 │   │   ├── bland.py              # Bland AI client
 │   │   ├── anthropic_client.py   # Anthropic API client
-│   │   └── sns.py                # SNS publisher
+│   │   ├── sns.py                # SNS publisher
+│   │   └── ssm.py                # SSM Parameter Store (secrets)
 │   └── handlers/                 # Lambda entry points
 │       ├── trigger.py            # POST /trigger handler
 │       └── webhook.py            # POST /webhook handler
 ├── tests/
-│   └── unit/                     # Unit tests
+│   └── unit/                     # Unit tests (13 tests)
 ├── pyproject.toml                # Dependencies
 └── Makefile                      # Build commands
 ```
@@ -101,32 +108,32 @@ kairos/
 
 ## Implementation Checklist
 
-### Phase 1: Setup
+### Phase 1: Setup ✅ COMPLETE
 - [x] Initialize project structure
 - [x] Create pyproject.toml with dependencies
 - [x] Implement Pydantic models
 - [x] Implement prompt builders
-- [x] Create adapter stubs
-- [x] Create handler stubs
-- [x] Setup CDK skeleton
-- [x] Create unit tests
-- [ ] Store secrets in SSM Parameter Store:
+- [x] Create adapters (Bland, Anthropic, SNS, SSM)
+- [x] Create Lambda handlers
+- [x] Setup CDK stack
+- [x] Create unit tests (13 tests passing)
+- [x] Store secrets in SSM Parameter Store:
   ```bash
-  aws ssm put-parameter --name "/kairos/bland-api-key" --value "YOUR_KEY" --type SecureString
-  aws ssm put-parameter --name "/kairos/anthropic-api-key" --value "YOUR_KEY" --type SecureString
-  aws ssm put-parameter --name "/kairos/my-phone-number" --value "+15551234567" --type String
+  aws ssm put-parameter --name "/kairos/bland-api-key" --value "sk-..." --type SecureString
+  aws ssm put-parameter --name "/kairos/anthropic-api-key" --value "sk-ant-..." --type SecureString
+  aws ssm put-parameter --name "/kairos/my-phone-number" --value "+1XXXXXXXXXX" --type String
   ```
 
-### Phase 2: Build & Deploy
-- [ ] Install dependencies: `make install-dev`
-- [ ] Run tests: `make test`
-- [ ] Run linter: `make lint`
-- [ ] Build Lambda layer: `make layer`
-- [ ] Bootstrap CDK (if first time): `cd cdk && cdk bootstrap`
-- [ ] Deploy: `make deploy`
-- [ ] Note the Function URLs from CloudFormation outputs
+### Phase 2: Build & Deploy ✅ COMPLETE
+- [x] Install dependencies: `uv pip install -e ".[dev,cdk]"`
+- [x] Run tests: `make test` (13 passed)
+- [x] Run linter: `make lint` (all checks passed)
+- [x] Build Lambda layer: `make layer`
+- [x] Bootstrap CDK: `cdk bootstrap`
+- [x] Deploy: `make deploy`
+- [x] Note the Function URLs from CloudFormation outputs
 
-### Phase 3: End-to-End Test
+### Phase 3: End-to-End Test ⏳ IN PROGRESS
 - [ ] Test trigger endpoint:
   ```bash
   curl -X POST https://YOUR_TRIGGER_URL/ \
@@ -154,6 +161,28 @@ kairos/
 - [ ] Add CloudWatch Alarms for errors
 - [ ] Add structured logging correlation IDs
 
+## Deployed Resources
+
+| Resource | Name/ARN |
+|----------|----------|
+| Trigger Lambda | `kairos-trigger` |
+| Webhook Lambda | `kairos-webhook` |
+| SNS Topic | `KairosSMSTopic` |
+| Lambda Layer | `KairosDepsLayer` |
+
+**Function URLs:** (get from `aws cloudformation describe-stacks --stack-name KairosStack`)
+- TriggerUrl: `https://xxx.lambda-url.REGION.on.aws/`
+- WebhookUrl: `https://xxx.lambda-url.REGION.on.aws/`
+
+## Secrets Management
+
+API keys are stored as **SecureString** in SSM Parameter Store and fetched at Lambda runtime (not injected as environment variables). This allows:
+- Secret rotation without redeployment
+- Proper encryption at rest
+- IAM-based access control
+
+The SSM adapter (`src/adapters/ssm.py`) uses LRU caching to avoid repeated API calls within a single invocation.
+
 ## Cost Estimate (Per Call)
 
 | Service | Cost |
@@ -168,15 +197,22 @@ kairos/
 
 ```bash
 # Setup
-make install-dev
+uv venv --python 3.12
+source .venv/bin/activate
+uv pip install -e ".[dev,cdk]"
 
-# Test
+# Test & Lint
 make test
+make lint
 
 # Deploy
+make layer
 make deploy
+
+# Get Function URLs
+aws cloudformation describe-stacks --stack-name KairosStack \
+  --query "Stacks[0].Outputs" --output table
 
 # Clean
 make clean
 ```
-

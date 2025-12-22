@@ -23,11 +23,18 @@ format:
 test:
 	pytest tests/unit -v
 
-# Build Lambda layer
+# Build Lambda layer (Linux ARM64 for Lambda)
 layer:
+	rm -rf layer
 	mkdir -p layer/python
-	pip install pydantic httpx anthropic aws-lambda-powertools -t layer/python
-	@echo "Layer built at ./layer"
+	pip install \
+		--platform manylinux2014_aarch64 \
+		--target layer/python \
+		--only-binary=:all: \
+		--implementation cp \
+		--python-version 3.12 \
+		pydantic httpx anthropic aws-lambda-powertools
+	@echo "Layer built at ./layer (manylinux2014_aarch64)"
 
 # Deploy to AWS
 deploy: layer
