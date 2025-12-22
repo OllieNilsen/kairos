@@ -21,7 +21,7 @@ class EventContext(BaseModel):
 class TriggerPayload(BaseModel):
     """Incoming request to initiate a debrief call."""
 
-    phone_number: str = Field(..., pattern=r"^\+1\d{10}$")
+    phone_number: str = Field(..., pattern=r"^\+[1-9]\d{6,14}$")  # E.164 international
     event_context: EventContext
     interview_prompts: list[str] = Field(..., min_length=1, max_length=5)
 
