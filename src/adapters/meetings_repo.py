@@ -28,7 +28,7 @@ class MeetingsRepository:
 
         Uses meeting_id as the sort key, so updates replace existing meetings.
         """
-        item = {
+        item: dict[str, Any] = {
             "user_id": meeting.user_id,
             "meeting_id": meeting.meeting_id,
             "title": meeting.title,
@@ -40,6 +40,12 @@ class MeetingsRepository:
             "created_at": meeting.created_at.isoformat(),
             "ttl": int(datetime.now(UTC).timestamp()) + 86400 * 30,  # 30 days
         }
+
+        # Add optional fields if present
+        if meeting.description:
+            item["description"] = meeting.description
+        if meeting.location:
+            item["location"] = meeting.location
 
         self.table.put_item(Item=item)
 
@@ -123,6 +129,8 @@ class MeetingsRepository:
             user_id=item["user_id"],
             meeting_id=item["meeting_id"],
             title=item["title"],
+            description=item.get("description"),
+            location=item.get("location"),
             start_time=datetime.fromisoformat(item["start_time"]),
             end_time=datetime.fromisoformat(item["end_time"]),
             attendees=item.get("attendees", []),

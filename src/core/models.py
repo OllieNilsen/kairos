@@ -74,6 +74,8 @@ class Meeting(BaseModel):
     user_id: str
     meeting_id: str  # Google Calendar event ID
     title: str
+    description: str | None = None  # Meeting agenda/notes from calendar
+    location: str | None = None  # Meeting location or video link
     start_time: datetime
     end_time: datetime
     attendees: list[str] = Field(default_factory=list)
@@ -94,3 +96,15 @@ class Meeting(BaseModel):
             participants=self.attendees,
             duration_minutes=self.duration_minutes(),
         )
+
+    def context_for_prompt(self) -> str:
+        """Generate rich context string for AI prompts."""
+        parts = [f"Meeting: {self.title}"]
+        if self.description:
+            parts.append(f"Agenda/Notes: {self.description}")
+        if self.location:
+            parts.append(f"Location: {self.location}")
+        if self.attendees:
+            parts.append(f"Attendees: {', '.join(self.attendees)}")
+        parts.append(f"Duration: {self.duration_minutes()} minutes")
+        return "\n".join(parts)

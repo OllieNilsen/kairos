@@ -151,11 +151,17 @@ def sync_calendar_events() -> dict[str, int]:
         if existing and existing.google_etag == event.get("etag"):
             continue
 
+        # Extract description and location
+        description = event.get("description", "").strip() or None
+        location = event.get("location", "").strip() or None
+
         # Create or update the meeting
         meeting = Meeting(
             user_id=user_id,
             meeting_id=event["id"],
             title=title,
+            description=description,
+            location=location,
             start_time=start_dt,
             end_time=end_dt,
             attendees=extract_attendee_names(event),
