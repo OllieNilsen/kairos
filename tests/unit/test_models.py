@@ -100,7 +100,7 @@ class TestBlandWebhookPayload:
             status="completed",
             to="+15551234567",
             **{"from": "+18005551234"},  # 'from' is a reserved keyword
-            duration=180,
+            call_length=3.5,
             transcript=[
                 TranscriptTurn(speaker="assistant", text="Hello"),
                 TranscriptTurn(speaker="user", text="Hi there"),
@@ -119,7 +119,34 @@ class TestBlandWebhookPayload:
                 "status": "completed",
                 "to": "+15551234567",
                 "from": "+18001234567",
-                "duration": 60,
             }
         )
         assert payload.from_number == "+18001234567"
+
+    def test_ignores_extra_fields(self):
+        """Should ignore unknown fields from Bland API."""
+        payload = BlandWebhookPayload.model_validate(
+            {
+                "call_id": "test",
+                "status": "completed",
+                "unknown_field": "ignored",
+                "transfer_duration": None,
+                "another_field": {"nested": "value"},
+            }
+        )
+        assert payload.call_id == "test"
+
+    def test_nested_variables(self):
+        """Should accept nested metadata in variables."""
+        payload = BlandWebhookPayload.model_validate(
+            {
+                "call_id": "test",
+                "status": "completed",
+                "variables": {
+                    "metadata": {
+                        "event_context": '{"event_type": "general", "subject": "Test"}'
+                    }
+                },
+            }
+        )
+        assert payload.variables["metadata"]["event_context"] is not None

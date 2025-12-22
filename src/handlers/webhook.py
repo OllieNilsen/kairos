@@ -109,15 +109,34 @@ def handler(event: dict[str, Any], context: LambdaContext) -> dict[str, Any]:
 def _extract_event_context(payload: BlandWebhookPayload) -> EventContext:
     """Extract EventContext from webhook variables.
 
+    Bland sends variables in nested structure:
+    - variables.metadata.event_context (from our metadata field)
+    - or variables.event_context (flat)
+
     Falls back to defaults if not present.
     """
     try:
-        context_json = payload.variables.get("event_context", "{}")
-        return EventContext.model_validate_json(context_json)
-    except Exception:
-        logger.warning("Could not extract event context, using defaults")
-        return EventContext(
-            event_type="general",
-            subject="Debrief Call",
-            participants=[],
-        )
+        # Try nested path first (Bland wraps our metadata)
+        metadata = payload.variables.get("metadata", {})
+        if isinstance(metadata, dict):
+            context_json = metadata.get("event_context", "")
+            if context_json:
+                return EventContext.model_validate_json(context_json)
+
+        # Try flat path
+        context_json = payload.variables.get("event_context", "")
+        if context_json:
+            if isinstance(context_json, str):
+                return EventContext.model_validate_json(context_json)
+            elif isinstance(context_json, dict):
+                return EventContext.model_validate(context_json)
+
+    except Exception as e:
+        logger.warning("Could not extract event context", extra={"error": str(e)})
+
+    # Fallback to defaults
+    return EventContext(
+        event_type="general",
+        subject="Debrief Call",
+        participants=[],
+    )

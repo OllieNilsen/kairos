@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -45,17 +45,20 @@ class TranscriptTurn(BaseModel):
 
 
 class BlandWebhookPayload(BaseModel):
-    """Webhook payload from Bland AI on call completion."""
+    """Webhook payload from Bland AI on call completion.
+
+    Note: Bland's actual payload varies. We accept extra fields and make most optional.
+    """
 
     call_id: str
-    status: Literal["completed", "failed", "no-answer", "busy"]
-    to: str
-    from_number: str = Field(..., alias="from")
+    status: str  # Bland sends various statuses, don't restrict
+    to: str = ""
+    from_number: str = Field(default="", alias="from")
     started_at: str | None = None
     ended_at: str | None = None
-    duration: int  # seconds
+    call_length: float | None = None  # Bland uses call_length (in minutes)
     transcript: list[TranscriptTurn] = Field(default_factory=list)
     concatenated_transcript: str = ""
-    variables: dict[str, str] = Field(default_factory=dict)
+    variables: dict[str, Any] = Field(default_factory=dict)  # Can be nested
 
-    model_config = {"populate_by_name": True}
+    model_config = {"populate_by_name": True, "extra": "ignore"}
