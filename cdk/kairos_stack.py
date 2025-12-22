@@ -1,4 +1,4 @@
-"""Kairos CDK Stack - Lambda Functions, SNS, and Function URLs."""
+"""Kairos CDK Stack - Lambda Functions, SES Email, and Function URLs."""
 
 from pathlib import Path
 
@@ -9,7 +9,6 @@ from aws_cdk import (
     aws_iam as iam,
     aws_lambda as lambda_,
     aws_logs as logs,
-    aws_sns as sns,
     aws_ssm as ssm,
 )
 from constructs import Construct
@@ -17,7 +16,7 @@ from constructs import Construct
 # SSM Parameter names (stored as SecureString)
 SSM_BLAND_API_KEY = "/kairos/bland-api-key"
 SSM_ANTHROPIC_API_KEY = "/kairos/anthropic-api-key"
-SSM_MY_PHONE = "/kairos/my-phone-number"
+SSM_MY_EMAIL = "/kairos/my-email"
 
 
 class KairosStack(Stack):
@@ -26,25 +25,9 @@ class KairosStack(Stack):
     def __init__(self, scope: Construct, id: str, **kwargs) -> None:
         super().__init__(scope, id, **kwargs)
 
-        # === SSM Parameter References (for phone number only - not a secret) ===
-        my_phone = ssm.StringParameter.value_for_string_parameter(
-            self, SSM_MY_PHONE
-        )
-
-        # === SNS Topic for SMS ===
-        sms_topic = sns.Topic(
-            self,
-            "KairosSMSTopic",
-            display_name="Kairos Debrief Summaries",
-        )
-
-        # SMS Subscription
-        sns.Subscription(
-            self,
-            "SMSSubscription",
-            topic=sms_topic,
-            protocol=sns.SubscriptionProtocol.SMS,
-            endpoint=my_phone,
+        # === SSM Parameter References ===
+        my_email = ssm.StringParameter.value_for_string_parameter(
+            self, SSM_MY_EMAIL
         )
 
         # === Lambda Layer for Dependencies ===
@@ -77,18 +60,18 @@ class KairosStack(Stack):
             handler="handlers.webhook.handler",
             environment={
                 "SSM_ANTHROPIC_API_KEY": SSM_ANTHROPIC_API_KEY,
-                "SNS_TOPIC_ARN": sms_topic.topic_arn,
+                "SENDER_EMAIL": my_email,  # Must be verified in SES
+                "RECIPIENT_EMAIL": my_email,  # Send to self for MVP
                 "POWERTOOLS_SERVICE_NAME": "kairos-webhook",
             },
             **common_lambda_props,
         )
-        sms_topic.grant_publish(webhook_fn)
 
-        # Grant direct SMS publish permission (phone numbers aren't ARNs, so resource is *)
+        # Grant SES send email permission
         webhook_fn.add_to_role_policy(
             iam.PolicyStatement(
-                actions=["sns:Publish"],
-                resources=["*"],  # Required for direct SMS to phone numbers
+                actions=["ses:SendEmail", "ses:SendRawEmail"],
+                resources=["*"],  # SES doesn't support resource-level permissions well
             )
         )
 
