@@ -1,14 +1,19 @@
-"""Kairos CDK Stack - Lambda Functions, SES Email, and Function URLs."""
+"""Kairos CDK Stack - Lambda Functions, SES Email, DynamoDB, and Function URLs."""
 
 from pathlib import Path
 
 import aws_cdk as cdk
 from aws_cdk import (
     Duration,
+    RemovalPolicy,
     Stack,
+    aws_cloudwatch as cloudwatch,
+    aws_cloudwatch_actions as cw_actions,
+    aws_dynamodb as dynamodb,
     aws_iam as iam,
     aws_lambda as lambda_,
     aws_logs as logs,
+    aws_sns as sns,
     aws_ssm as ssm,
 )
 from constructs import Construct
@@ -28,6 +33,34 @@ class KairosStack(Stack):
         # === SSM Parameter References ===
         my_email = ssm.StringParameter.value_for_string_parameter(
             self, SSM_MY_EMAIL
+        )
+
+        # === DynamoDB Table for Call Deduplication ===
+        dedup_table = dynamodb.Table(
+            self,
+            "CallDeduplicationTable",
+            table_name="kairos-call-dedup",
+            partition_key=dynamodb.Attribute(
+                name="call_id", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,  # For dev - change for prod
+            time_to_live_attribute="ttl",  # Auto-cleanup old entries
+        )
+
+        # === SNS Topic for Alarms ===
+        alarm_topic = sns.Topic(
+            self,
+            "KairosAlarmTopic",
+            display_name="Kairos Error Alerts",
+        )
+        # Subscribe your email to alarm notifications
+        sns.Subscription(
+            self,
+            "AlarmEmailSubscription",
+            topic=alarm_topic,
+            protocol=sns.SubscriptionProtocol.EMAIL,
+            endpoint=my_email,
         )
 
         # === Lambda Layer for Dependencies ===
@@ -62,10 +95,14 @@ class KairosStack(Stack):
                 "SSM_ANTHROPIC_API_KEY": SSM_ANTHROPIC_API_KEY,
                 "SENDER_EMAIL": my_email,  # Must be verified in SES
                 "RECIPIENT_EMAIL": my_email,  # Send to self for MVP
+                "DEDUP_TABLE_NAME": dedup_table.table_name,
                 "POWERTOOLS_SERVICE_NAME": "kairos-webhook",
             },
             **common_lambda_props,
         )
+
+        # Grant DynamoDB access for deduplication
+        dedup_table.grant_read_write_data(webhook_fn)
 
         # Grant SES send email permission
         webhook_fn.add_to_role_policy(
@@ -84,6 +121,20 @@ class KairosStack(Stack):
                 ],
             )
         )
+
+        # === CloudWatch Alarm for Webhook Errors ===
+        webhook_errors = webhook_fn.metric_errors(period=Duration.minutes(5))
+        webhook_alarm = cloudwatch.Alarm(
+            self,
+            "WebhookErrorAlarm",
+            metric=webhook_errors,
+            threshold=1,
+            evaluation_periods=1,
+            alarm_description="Kairos webhook Lambda errors",
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+        webhook_alarm.add_alarm_action(cw_actions.SnsAction(alarm_topic))
 
         webhook_url = webhook_fn.add_function_url(
             auth_type=lambda_.FunctionUrlAuthType.NONE,
@@ -117,6 +168,20 @@ class KairosStack(Stack):
                 ],
             )
         )
+
+        # === CloudWatch Alarm for Trigger Errors ===
+        trigger_errors = trigger_fn.metric_errors(period=Duration.minutes(5))
+        trigger_alarm = cloudwatch.Alarm(
+            self,
+            "TriggerErrorAlarm",
+            metric=trigger_errors,
+            threshold=1,
+            evaluation_periods=1,
+            alarm_description="Kairos trigger Lambda errors",
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+        trigger_alarm.add_alarm_action(cw_actions.SnsAction(alarm_topic))
 
         trigger_url = trigger_fn.add_function_url(
             auth_type=lambda_.FunctionUrlAuthType.NONE,

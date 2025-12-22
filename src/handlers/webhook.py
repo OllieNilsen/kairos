@@ -10,6 +10,7 @@ from aws_lambda_powertools import Logger
 from pydantic import ValidationError
 
 from adapters.anthropic_client import AnthropicSummarizer
+from adapters.dynamodb import CallDeduplicator
 from adapters.ses import SESPublisher
 from adapters.ssm import get_parameter
 from core.models import BlandWebhookPayload, EventContext
@@ -23,6 +24,7 @@ logger = Logger(service="kairos-webhook")
 # Lazy initialization for cold start optimization
 _anthropic: AnthropicSummarizer | None = None
 _ses: SESPublisher | None = None
+_deduplicator: CallDeduplicator | None = None
 
 
 def get_anthropic() -> AnthropicSummarizer:
@@ -42,6 +44,17 @@ def get_ses() -> SESPublisher:
         sender_email = os.environ["SENDER_EMAIL"]
         _ses = SESPublisher(sender_email)
     return _ses
+
+
+def get_deduplicator() -> CallDeduplicator | None:
+    """Get or create the deduplicator (if table is configured)."""
+    global _deduplicator
+    table_name = os.environ.get("DEDUP_TABLE_NAME")
+    if not table_name:
+        return None
+    if _deduplicator is None:
+        _deduplicator = CallDeduplicator(table_name)
+    return _deduplicator
 
 
 @logger.inject_lambda_context
@@ -74,6 +87,12 @@ def handler(event: dict[str, Any], context: LambdaContext) -> dict[str, Any]:
     if payload.status != "completed":
         logger.info("Ignoring non-completed call", extra={"status": payload.status})
         return {"statusCode": 200, "body": json.dumps({"status": "ignored"})}
+
+    # Check for duplicate processing
+    deduplicator = get_deduplicator()
+    if deduplicator and deduplicator.is_duplicate(payload.call_id):
+        logger.warning("Duplicate call_id detected", extra={"call_id": payload.call_id})
+        return {"statusCode": 200, "body": json.dumps({"status": "duplicate"})}
 
     # Extract event context from variables (passed through from trigger)
     event_context = _extract_event_context(payload)
