@@ -272,6 +272,36 @@ class KairosStack(Stack):
         )
         calendar_webhook_alarm.add_alarm_action(cw_actions.SnsAction(alarm_topic))
 
+        # ========================================
+        # SLICE 2 MVP: User State & Idempotency
+        # ========================================
+
+        # === DynamoDB Table for User State ===
+        user_state_table = dynamodb.Table(
+            self,
+            "UserStateTable",
+            table_name="kairos-user-state",
+            partition_key=dynamodb.Attribute(
+                name="user_id", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,  # For dev - change for prod
+        )
+
+        # === DynamoDB Table for Idempotency ===
+        # Used for SMS dedup, call batch dedup, and daily leases
+        idempotency_table = dynamodb.Table(
+            self,
+            "IdempotencyTable",
+            table_name="kairos-idempotency",
+            partition_key=dynamodb.Attribute(
+                name="idempotency_key", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,  # For dev - change for prod
+            time_to_live_attribute="ttl",  # Auto-cleanup old entries
+        )
+
         # === Outputs ===
         cdk.CfnOutput(
             self,

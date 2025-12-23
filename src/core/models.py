@@ -7,6 +7,49 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+# === User State (Slice 2 MVP) ===
+
+
+class UserState(BaseModel):
+    """User state for notification budget and scheduling.
+
+    Stored in kairos-user-state DynamoDB table.
+    """
+
+    user_id: str
+
+    # Contact info
+    phone_number: str | None = None  # E.164 format
+    email: str | None = None  # Optional, for future use
+
+    # Timezone and scheduling
+    timezone: str = "Europe/London"
+    preferred_prompt_time: str = "17:30"  # HH:MM format
+    next_prompt_at: str | None = None  # ISO8601 - when to send today's prompt
+    prompt_schedule_name: str | None = None  # EventBridge Scheduler schedule name
+    debrief_event_id: str | None = None  # Google Calendar event ID for today's debrief
+    debrief_event_etag: str | None = None  # For detecting user modifications
+
+    # Daily state (reset each morning by daily_plan_prompt)
+    prompts_sent_today: int = 0
+    last_prompt_at: str | None = None  # ISO8601
+    awaiting_reply: bool = False
+    active_prompt_id: str | None = None
+    daily_call_made: bool = False
+    last_call_at: str | None = None  # ISO8601
+    daily_batch_id: str | None = None
+    last_daily_reset: str | None = None  # ISO8601 - when counters were last reset
+
+    # Control state
+    snooze_until: str | None = None  # ISO8601 - don't prompt/call until this time
+    stopped: bool = False  # User opted out (STOP) - never prompt/call
+
+    # Google OAuth (from Phase 2A)
+    google_refresh_token: str | None = None
+    google_channel_id: str | None = None
+    google_channel_expiry: str | None = None
+
+
 # === Trigger Payload (User -> Trigger Lambda) ===
 
 
