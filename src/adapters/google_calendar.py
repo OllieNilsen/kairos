@@ -132,6 +132,116 @@ class GoogleCalendarClient:
         """
         return self._request("GET", f"/calendars/{calendar_id}/events/{event_id}")
 
+    def create_event(
+        self,
+        summary: str,
+        start_time: datetime,
+        end_time: datetime,
+        description: str = "",
+        calendar_id: str = "primary",
+        extended_properties: dict[str, dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
+        """Create a calendar event.
+
+        Args:
+            summary: Event title
+            start_time: Start datetime (timezone-aware)
+            end_time: End datetime (timezone-aware)
+            description: Optional event description
+            calendar_id: Calendar ID (default: primary calendar)
+            extended_properties: Optional extended properties for tagging
+                e.g., {"private": {"kairos_type": "debrief", "kairos_user_id": "user123"}}
+
+        Returns:
+            Created event dictionary with id and etag
+        """
+        event_body: dict[str, Any] = {
+            "summary": summary,
+            "start": {"dateTime": start_time.isoformat()},
+            "end": {"dateTime": end_time.isoformat()},
+        }
+
+        if description:
+            event_body["description"] = description
+
+        if extended_properties:
+            event_body["extendedProperties"] = extended_properties
+
+        return self._request("POST", f"/calendars/{calendar_id}/events", json=event_body)
+
+    def update_event(
+        self,
+        event_id: str,
+        summary: str | None = None,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+        description: str | None = None,
+        calendar_id: str = "primary",
+    ) -> dict[str, Any]:
+        """Update an existing calendar event.
+
+        Only provided fields will be updated.
+
+        Args:
+            event_id: The event ID to update
+            summary: New event title
+            start_time: New start datetime
+            end_time: New end datetime
+            description: New description
+            calendar_id: Calendar ID
+
+        Returns:
+            Updated event dictionary
+        """
+        # First get the existing event to preserve fields
+        existing = self.get_event(event_id, calendar_id)
+
+        event_body: dict[str, Any] = {}
+
+        if summary is not None:
+            event_body["summary"] = summary
+        else:
+            event_body["summary"] = existing.get("summary", "")
+
+        if start_time is not None:
+            event_body["start"] = {"dateTime": start_time.isoformat()}
+        else:
+            event_body["start"] = existing.get("start", {})
+
+        if end_time is not None:
+            event_body["end"] = {"dateTime": end_time.isoformat()}
+        else:
+            event_body["end"] = existing.get("end", {})
+
+        if description is not None:
+            event_body["description"] = description
+        elif "description" in existing:
+            event_body["description"] = existing["description"]
+
+        # Preserve extended properties
+        if "extendedProperties" in existing:
+            event_body["extendedProperties"] = existing["extendedProperties"]
+
+        return self._request("PUT", f"/calendars/{calendar_id}/events/{event_id}", json=event_body)
+
+    def delete_event(self, event_id: str, calendar_id: str = "primary") -> bool:
+        """Delete a calendar event.
+
+        Args:
+            event_id: The event ID to delete
+            calendar_id: Calendar ID
+
+        Returns:
+            True if deleted successfully
+        """
+        token = self._get_access_token()
+        response = httpx.delete(
+            f"{CALENDAR_API_BASE}/calendars/{calendar_id}/events/{event_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        # 204 No Content or 404 Not Found are both acceptable
+        return response.status_code in (204, 404, 410)
+
     def watch_calendar(
         self,
         webhook_url: str,

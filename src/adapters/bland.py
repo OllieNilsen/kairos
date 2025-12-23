@@ -70,6 +70,46 @@ class BlandClient:
         data: dict[str, str] = response.json()
         return data["call_id"]
 
+    async def initiate_call_raw(
+        self,
+        phone_number: str,
+        system_prompt: str,
+        webhook_url: str,
+        variables: dict[str, object] | None = None,
+    ) -> str:
+        """Initiate an outbound voice call with raw parameters.
+
+        Args:
+            phone_number: E.164 phone number to call
+            system_prompt: The system prompt for the voice agent
+            webhook_url: URL for Bland to call when the call ends
+            variables: Optional variables to pass through to webhook
+
+        Returns:
+            The call_id from Bland AI
+
+        Raises:
+            httpx.HTTPStatusError: If the API call fails
+        """
+        client = await self._get_client()
+
+        request_body: dict[str, object] = {
+            "phone_number": phone_number,
+            "task": system_prompt,
+            "voice": "maya",
+            "reduce_latency": True,
+            "webhook": webhook_url,
+        }
+
+        if variables:
+            request_body["metadata"] = variables
+
+        response = await client.post("/calls", json=request_body)
+        response.raise_for_status()
+
+        data: dict[str, str] = response.json()
+        return data["call_id"]
+
     async def close(self) -> None:
         """Close the HTTP client."""
         if self._client:
