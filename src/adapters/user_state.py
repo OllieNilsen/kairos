@@ -343,8 +343,7 @@ class UserStateRepository:
             # Control state
             snooze_until=item.get("snooze_until"),
             stopped=item.get("stopped", False),
-            # Google OAuth
-            google_refresh_token=item.get("google_refresh_token"),
+            # Google Calendar push subscription (refresh token is in SSM)
             google_channel_id=item.get("google_channel_id"),
             google_channel_expiry=item.get("google_channel_expiry"),
         )
@@ -363,11 +362,20 @@ class UserStateRepository:
 
         # Add optional fields if they have values
         optional_fields = [
-            "phone_number", "email", "next_prompt_at", "prompt_schedule_name",
-            "debrief_event_id", "debrief_event_etag", "last_prompt_at",
-            "active_prompt_id", "last_call_at", "daily_batch_id",
-            "last_daily_reset", "snooze_until", "google_refresh_token",
-            "google_channel_id", "google_channel_expiry",
+            "phone_number",
+            "email",
+            "next_prompt_at",
+            "prompt_schedule_name",
+            "debrief_event_id",
+            "debrief_event_etag",
+            "last_prompt_at",
+            "active_prompt_id",
+            "last_call_at",
+            "daily_batch_id",
+            "last_daily_reset",
+            "snooze_until",
+            "google_channel_id",
+            "google_channel_expiry",
         ]
 
         for field in optional_fields:
@@ -376,4 +384,3 @@ class UserStateRepository:
                 item[field] = value
 
         return item
-

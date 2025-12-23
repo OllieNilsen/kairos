@@ -12,7 +12,7 @@ install-dev:
 lint:
 	ruff check src tests
 	ruff format --check src tests
-	mypy src
+	mypy src --ignore-missing-imports
 
 # Format code
 format:

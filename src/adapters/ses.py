@@ -36,4 +36,4 @@ class SESPublisher:
                 "Body": {"Text": {"Data": body, "Charset": "UTF-8"}},
             },
         )
-        return response["MessageId"]
+        return str(response["MessageId"])

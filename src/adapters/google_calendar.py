@@ -80,7 +80,8 @@ class GoogleCalendarClient:
         response = httpx.request(method, url, headers=headers, **kwargs)
         response.raise_for_status()
 
-        return response.json()
+        result: dict[str, Any] = response.json()
+        return result
 
     def list_events(
         self,
@@ -116,7 +117,8 @@ class GoogleCalendarClient:
         }
 
         data = self._request("GET", f"/calendars/{calendar_id}/events", params=params)
-        return data.get("items", [])
+        items: list[dict[str, Any]] = data.get("items", [])
+        return items
 
     def get_event(self, event_id: str, calendar_id: str = "primary") -> dict[str, Any]:
         """Get a single calendar event by ID.

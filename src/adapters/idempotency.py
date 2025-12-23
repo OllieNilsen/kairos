@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 import boto3
 from botocore.exceptions import ClientError
@@ -36,7 +37,7 @@ class IdempotencyStore:
         self.dynamodb = boto3.resource("dynamodb", region_name=region)
         self.table = self.dynamodb.Table(table_name)
 
-    def try_acquire(self, key: str, metadata: dict | None = None) -> bool:
+    def try_acquire(self, key: str, metadata: dict[str, Any] | None = None) -> bool:
         """Try to acquire an idempotency lock for the given key.
 
         Uses conditional PutItem with attribute_not_exists to ensure
@@ -281,9 +282,7 @@ class DailyLease:
                     "expires_at": expires_at,
                     "ttl": ttl,
                 },
-                ConditionExpression=(
-                    "attribute_not_exists(idempotency_key) OR expires_at < :now"
-                ),
+                ConditionExpression=("attribute_not_exists(idempotency_key) OR expires_at < :now"),
                 ExpressionAttributeValues={":now": now.timestamp()},
             )
             return True
@@ -314,4 +313,3 @@ class DailyLease:
             if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
                 return False
             raise
-
