@@ -36,7 +36,11 @@ class UserState(BaseModel):
     awaiting_reply: bool = False
     active_prompt_id: str | None = None
     daily_call_made: bool = False
+    call_successful: bool = False  # True only if call completed successfully
+    retries_today: int = 0  # Count of retry attempts today (max 3)
     last_call_at: str | None = None  # ISO8601
+    next_retry_at: str | None = None  # ISO8601 - scheduled retry time
+    retry_schedule_name: str | None = None  # EventBridge schedule name for retry
     daily_batch_id: str | None = None
     last_daily_reset: str | None = None  # ISO8601 - when counters were last reset
 

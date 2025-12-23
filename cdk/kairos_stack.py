@@ -433,6 +433,43 @@ class KairosStack(Stack):
             )
         )
 
+        # ========================================
+        # SLICE 2 MVP: Webhook Retry Support
+        # ========================================
+        # Add retry-related environment variables to webhook Lambda
+        # (must be done after dependent resources are created)
+        webhook_fn.add_environment("USER_STATE_TABLE", user_state_table.table_name)
+        webhook_fn.add_environment("IDEMPOTENCY_TABLE", idempotency_table.table_name)
+        webhook_fn.add_environment("PROMPT_SENDER_LAMBDA_ARN", prompt_sender_fn.function_arn)
+        webhook_fn.add_environment("SCHEDULER_ROLE_ARN", scheduler_role.role_arn)
+
+        # Grant webhook Lambda access to user state and idempotency tables
+        user_state_table.grant_read_write_data(webhook_fn)
+        idempotency_table.grant_read_write_data(webhook_fn)
+
+        # Grant webhook Lambda permission to create/update schedules (for retries)
+        webhook_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "scheduler:CreateSchedule",
+                    "scheduler:UpdateSchedule",
+                    "scheduler:DeleteSchedule",
+                    "scheduler:GetSchedule",
+                ],
+                resources=[
+                    f"arn:aws:scheduler:{self.region}:{self.account}:schedule/default/kairos-*",
+                ],
+            )
+        )
+
+        # Grant webhook Lambda permission to pass the scheduler role
+        webhook_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["iam:PassRole"],
+                resources=[scheduler_role.role_arn],
+            )
+        )
+
         # === EventBridge Scheduler: Daily 08:00 Europe/London ===
         # Using L1 construct since L2 for Scheduler is not yet available
         daily_schedule = scheduler.CfnSchedule(

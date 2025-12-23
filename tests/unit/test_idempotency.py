@@ -9,6 +9,7 @@ from botocore.exceptions import ClientError
 
 from src.adapters.idempotency import (
     CallBatchDedup,
+    CallRetryDedup,
     DailyLease,
     IdempotencyStore,
     InboundSMSDedup,
@@ -115,6 +116,49 @@ class TestCallBatchDedup:
         """Should generate call-batch:{user_id}#{date} format."""
         key = CallBatchDedup.make_key("user-001", "2024-01-15")
         assert key == "call-batch:user-001#2024-01-15"
+
+
+class TestCallRetryDedup:
+    """Tests for call retry deduplication."""
+
+    def test_make_key_format(self) -> None:
+        """Should generate call-retry:{user_id}#{date}#{retry_number} format."""
+        key = CallRetryDedup.make_key("user-001", "2024-01-15", 1)
+        assert key == "call-retry:user-001#2024-01-15#1"
+
+    def test_make_key_format_different_retry_numbers(self) -> None:
+        """Should include retry number in key."""
+        key1 = CallRetryDedup.make_key("user-001", "2024-01-15", 1)
+        key2 = CallRetryDedup.make_key("user-001", "2024-01-15", 2)
+        key3 = CallRetryDedup.make_key("user-001", "2024-01-15", 3)
+
+        assert key1 == "call-retry:user-001#2024-01-15#1"
+        assert key2 == "call-retry:user-001#2024-01-15#2"
+        assert key3 == "call-retry:user-001#2024-01-15#3"
+
+    def test_try_schedule_retry(self) -> None:
+        """Should call try_acquire with correct key and metadata."""
+        with patch("boto3.resource"):
+            dedup = CallRetryDedup("test-table")
+            dedup.try_acquire = MagicMock(return_value=True)
+
+            result = dedup.try_schedule_retry("user-001", "2024-01-15", 2)
+
+            assert result is True
+            dedup.try_acquire.assert_called_once_with(
+                "call-retry:user-001#2024-01-15#2",
+                {"type": "call_retry", "retry_number": 2},
+            )
+
+    def test_release_retry(self) -> None:
+        """Should call release with correct key."""
+        with patch("boto3.resource"):
+            dedup = CallRetryDedup("test-table")
+            dedup.release = MagicMock()
+
+            dedup.release_retry("user-001", "2024-01-15", 1)
+
+            dedup.release.assert_called_once_with("call-retry:user-001#2024-01-15#1")
 
 
 class TestDailyLease:

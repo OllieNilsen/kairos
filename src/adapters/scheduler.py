@@ -153,3 +153,18 @@ def make_prompt_schedule_name(user_id: str, date_str: str) -> str:
     # Sanitize user_id to be schedule-name-safe (alphanumeric, hyphens, underscores)
     safe_user_id = "".join(c if c.isalnum() or c in "-_" else "-" for c in user_id)
     return f"kairos-prompt-{safe_user_id}-{date_str}"
+
+
+def make_retry_schedule_name(user_id: str, date_str: str, retry_number: int) -> str:
+    """Generate the deterministic schedule name for a call retry.
+
+    Args:
+        user_id: User identifier
+        date_str: Date string (YYYY-MM-DD)
+        retry_number: Retry attempt number (1, 2, 3)
+
+    Returns:
+        Schedule name string
+    """
+    safe_user_id = "".join(c if c.isalnum() or c in "-_" else "-" for c in user_id)
+    return f"kairos-retry-{safe_user_id}-{date_str}-{retry_number}"

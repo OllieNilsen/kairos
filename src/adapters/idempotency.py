@@ -216,6 +216,56 @@ class CallBatchDedup(IdempotencyStore):
         key = self.make_key(user_id, date_str)
         self.release(key)
 
+    def release_call_batch(self, user_id: str, date_str: str) -> None:
+        """Alias for release_call for backwards compatibility."""
+        self.release_call(user_id, date_str)
+
+
+class CallRetryDedup(IdempotencyStore):
+    """Deduplication for call retries.
+
+    Prevents scheduling or executing the same retry multiple times.
+    """
+
+    @staticmethod
+    def make_key(user_id: str, date_str: str, retry_number: int) -> str:
+        """Generate the idempotency key for a call retry.
+
+        Args:
+            user_id: User identifier
+            date_str: Date string (YYYY-MM-DD)
+            retry_number: Retry attempt number (1, 2, 3)
+
+        Returns:
+            Idempotency key string
+        """
+        return f"call-retry:{user_id}#{date_str}#{retry_number}"
+
+    def try_schedule_retry(self, user_id: str, date_str: str, retry_number: int) -> bool:
+        """Try to mark a retry as scheduled.
+
+        Args:
+            user_id: User identifier
+            date_str: Date string (YYYY-MM-DD)
+            retry_number: Retry attempt number (1, 2, 3)
+
+        Returns:
+            True if this is the first schedule attempt for this retry
+        """
+        key = self.make_key(user_id, date_str, retry_number)
+        return self.try_acquire(key, {"type": "call_retry", "retry_number": retry_number})
+
+    def release_retry(self, user_id: str, date_str: str, retry_number: int) -> None:
+        """Release a retry lock (for retryable failures).
+
+        Args:
+            user_id: User identifier
+            date_str: Date string (YYYY-MM-DD)
+            retry_number: Retry attempt number
+        """
+        key = self.make_key(user_id, date_str, retry_number)
+        self.release(key)
+
 
 class DailyLease:
     """Simple lease/fencing mechanism for daily operations.

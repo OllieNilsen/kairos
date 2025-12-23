@@ -7,7 +7,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 from botocore.exceptions import ClientError
 
-from src.adapters.scheduler import SchedulerClient, make_prompt_schedule_name
+from src.adapters.scheduler import (
+    SchedulerClient,
+    make_prompt_schedule_name,
+    make_retry_schedule_name,
+)
 
 
 class TestMakePromptScheduleName:
@@ -27,6 +31,30 @@ class TestMakePromptScheduleName:
         """Should keep alphanumeric, hyphens, and underscores."""
         result = make_prompt_schedule_name("user_123-abc", "2024-01-15")
         assert result == "kairos-prompt-user_123-abc-2024-01-15"
+
+
+class TestMakeRetryScheduleName:
+    """Tests for make_retry_schedule_name helper."""
+
+    def test_generates_correct_format(self) -> None:
+        """Should generate kairos-retry-{user_id}-{date}-{retry_number} format."""
+        result = make_retry_schedule_name("user-001", "2024-01-15", 1)
+        assert result == "kairos-retry-user-001-2024-01-15-1"
+
+    def test_includes_retry_number(self) -> None:
+        """Should include retry number in the schedule name."""
+        result1 = make_retry_schedule_name("user-001", "2024-01-15", 1)
+        result2 = make_retry_schedule_name("user-001", "2024-01-15", 2)
+        result3 = make_retry_schedule_name("user-001", "2024-01-15", 3)
+
+        assert result1 == "kairos-retry-user-001-2024-01-15-1"
+        assert result2 == "kairos-retry-user-001-2024-01-15-2"
+        assert result3 == "kairos-retry-user-001-2024-01-15-3"
+
+    def test_sanitizes_special_characters(self) -> None:
+        """Should sanitize user_id in the same way as prompt schedule."""
+        result = make_retry_schedule_name("user@email.com", "2024-01-15", 1)
+        assert result == "kairos-retry-user-email-com-2024-01-15-1"
 
 
 class TestSchedulerClient:

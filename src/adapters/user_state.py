@@ -75,6 +75,10 @@ class UserStateRepository:
                 awaiting_reply = :false,
                 active_prompt_id = :null,
                 daily_call_made = :false,
+                call_successful = :false,
+                retries_today = :zero,
+                next_retry_at = :null,
+                retry_schedule_name = :null,
                 last_daily_reset = :now,
                 next_prompt_at = :next_prompt
         """
@@ -306,8 +310,9 @@ class UserStateRepository:
         if state.stopped:
             return False, "stopped"
 
-        if state.daily_call_made:
-            return False, "call_already_made"
+        # Only block if call was already successful (allow retries)
+        if state.daily_call_made and state.call_successful:
+            return False, "call_already_successful"
 
         if state.snooze_until:
             try:
@@ -318,6 +323,91 @@ class UserStateRepository:
                 pass
 
         return True, "ok"
+
+    def can_retry(self, state: UserState | None, max_retries: int = 3) -> tuple[bool, str]:
+        """Check if we can retry a call for the user.
+
+        Args:
+            state: The user's current state (or None if not found)
+            max_retries: Maximum number of retries allowed per day
+
+        Returns:
+            Tuple of (can_retry, reason)
+        """
+        if state is None:
+            return False, "user_not_found"
+
+        if state.stopped:
+            return False, "stopped"
+
+        if state.call_successful:
+            return False, "call_already_successful"
+
+        if state.retries_today >= max_retries:
+            return False, "max_retries_reached"
+
+        if state.snooze_until:
+            try:
+                snooze_dt = datetime.fromisoformat(state.snooze_until)
+                if datetime.now(UTC) < snooze_dt:
+                    return False, "snoozed"
+            except ValueError:
+                pass
+
+        return True, "ok"
+
+    def record_call_success(self, user_id: str) -> None:
+        """Mark the daily call as successful.
+
+        Args:
+            user_id: The user identifier
+        """
+        self.table.update_item(
+            Key={"user_id": user_id},
+            UpdateExpression="SET call_successful = :true",
+            ExpressionAttributeValues={":true": True},
+        )
+
+    def record_retry_scheduled(
+        self,
+        user_id: str,
+        next_retry_at: str,
+        retry_schedule_name: str,
+    ) -> None:
+        """Record that a retry has been scheduled.
+
+        Args:
+            user_id: The user identifier
+            next_retry_at: ISO8601 timestamp for the retry
+            retry_schedule_name: EventBridge Scheduler schedule name
+        """
+        self.table.update_item(
+            Key={"user_id": user_id},
+            UpdateExpression="""
+                SET retries_today = retries_today + :one,
+                    next_retry_at = :next_retry,
+                    retry_schedule_name = :schedule_name,
+                    daily_call_made = :false
+            """,
+            ExpressionAttributeValues={
+                ":one": 1,
+                ":next_retry": next_retry_at,
+                ":schedule_name": retry_schedule_name,
+                ":false": False,  # Reset so prompt_sender can run again
+            },
+        )
+
+    def clear_retry_schedule(self, user_id: str) -> None:
+        """Clear retry schedule info after successful call or max retries.
+
+        Args:
+            user_id: The user identifier
+        """
+        self.table.update_item(
+            Key={"user_id": user_id},
+            UpdateExpression="SET next_retry_at = :null, retry_schedule_name = :null",
+            ExpressionAttributeValues={":null": None},
+        )
 
     def _item_to_state(self, item: dict[str, Any]) -> UserState:
         """Convert DynamoDB item to UserState model."""
@@ -337,7 +427,11 @@ class UserStateRepository:
             awaiting_reply=item.get("awaiting_reply", False),
             active_prompt_id=item.get("active_prompt_id"),
             daily_call_made=item.get("daily_call_made", False),
+            call_successful=item.get("call_successful", False),
+            retries_today=item.get("retries_today", 0),
             last_call_at=item.get("last_call_at"),
+            next_retry_at=item.get("next_retry_at"),
+            retry_schedule_name=item.get("retry_schedule_name"),
             daily_batch_id=item.get("daily_batch_id"),
             last_daily_reset=item.get("last_daily_reset"),
             # Control state
@@ -357,6 +451,8 @@ class UserStateRepository:
             "prompts_sent_today": state.prompts_sent_today,
             "awaiting_reply": state.awaiting_reply,
             "daily_call_made": state.daily_call_made,
+            "call_successful": state.call_successful,
+            "retries_today": state.retries_today,
             "stopped": state.stopped,
         }
 
@@ -371,6 +467,8 @@ class UserStateRepository:
             "last_prompt_at",
             "active_prompt_id",
             "last_call_at",
+            "next_retry_at",
+            "retry_schedule_name",
             "daily_batch_id",
             "last_daily_reset",
             "snooze_until",

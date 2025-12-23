@@ -8,21 +8,24 @@ from __future__ import annotations
 
 import os
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from aws_lambda_powertools import Logger
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 # Support both Lambda and test import paths
 try:
     from adapters.bland import BlandClient
-    from adapters.idempotency import CallBatchDedup
+    from adapters.idempotency import CallBatchDedup, CallRetryDedup
     from adapters.meetings_repo import MeetingsRepository
     from adapters.ssm import get_parameter
     from adapters.user_state import UserStateRepository
     from core.models import Meeting
 except ImportError:
     from src.adapters.bland import BlandClient
-    from src.adapters.idempotency import CallBatchDedup
+    from src.adapters.idempotency import CallBatchDedup, CallRetryDedup
     from src.adapters.meetings_repo import MeetingsRepository
     from src.adapters.ssm import get_parameter
     from src.adapters.user_state import UserStateRepository
@@ -50,10 +53,11 @@ DEFAULT_INTERVIEW_PROMPTS = [
 def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     """Lambda handler for initiating daily debrief calls.
 
-    Triggered by one-time EventBridge Scheduler at the user's prompt time.
+    Triggered by one-time EventBridge Scheduler at the user's prompt time,
+    or by a retry schedule after an unsuccessful call.
 
     Args:
-        event: Contains user_id, date, scheduled_time
+        event: Contains user_id, date, is_retry, retry_number
         context: Lambda context
 
     Returns:
@@ -65,17 +69,48 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
 
     user_id = event.get("user_id", "user-001")
     date_str = event.get("date", datetime.now(UTC).strftime("%Y-%m-%d"))
+    is_retry = event.get("is_retry", False)
+    retry_number = event.get("retry_number", 0)
 
-    # 1. Check idempotency - only one call per day
-    call_dedup = CallBatchDedup(IDEMPOTENCY_TABLE, region=AWS_REGION)
-    if not call_dedup.try_initiate_call(user_id, date_str):
-        logger.info(
-            "Call already initiated for today", extra={"user_id": user_id, "date": date_str}
-        )
-        return {
-            "statusCode": 200,
-            "body": {"status": "already_called", "user_id": user_id, "date": date_str},
-        }
+    # 1. Check idempotency
+    release_func: Callable[[], None]
+
+    if is_retry:
+        # For retries, use retry-specific idempotency
+        retry_dedup = CallRetryDedup(IDEMPOTENCY_TABLE, region=AWS_REGION)
+        # The retry was already marked when scheduling, but check if already executed
+        # We use a separate key pattern for execution vs scheduling
+        exec_key = f"call-retry-exec:{user_id}#{date_str}#{retry_number}"
+        if not retry_dedup.try_acquire(exec_key):
+            logger.info(
+                "Retry already executed",
+                extra={"user_id": user_id, "date": date_str, "retry_number": retry_number},
+            )
+            return {
+                "statusCode": 200,
+                "body": {"status": "retry_already_executed", "retry_number": retry_number},
+            }
+
+        def _release_retry() -> None:
+            retry_dedup.release(exec_key)
+
+        release_func = _release_retry
+    else:
+        # For initial call, use daily batch idempotency
+        call_dedup = CallBatchDedup(IDEMPOTENCY_TABLE, region=AWS_REGION)
+        if not call_dedup.try_initiate_call(user_id, date_str):
+            logger.info(
+                "Call already initiated for today", extra={"user_id": user_id, "date": date_str}
+            )
+            return {
+                "statusCode": 200,
+                "body": {"status": "already_called", "user_id": user_id, "date": date_str},
+            }
+
+        def _release_call() -> None:
+            call_dedup.release_call_batch(user_id, date_str)
+
+        release_func = _release_call
 
     try:
         # 2. Get user state
@@ -84,7 +119,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
 
         if not user_state:
             logger.warning("User state not found", extra={"user_id": user_id})
-            call_dedup.release_call_batch(user_id, date_str)
+            release_func()
             return {
                 "statusCode": 404,
                 "body": {"status": "error", "message": "User not found"},
@@ -98,12 +133,28 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
                 "body": {"status": "user_stopped", "user_id": user_id},
             }
 
-        if user_state.daily_call_made:
-            logger.info("Daily call already made via user state")
-            return {
-                "statusCode": 200,
-                "body": {"status": "already_called", "user_id": user_id},
-            }
+        # For retries, check call_successful instead of daily_call_made
+        if is_retry:
+            if user_state.call_successful:
+                logger.info("Call already successful - skipping retry")
+                return {
+                    "statusCode": 200,
+                    "body": {"status": "call_already_successful", "user_id": user_id},
+                }
+            if user_state.retries_today >= 3:
+                logger.info("Max retries reached")
+                return {
+                    "statusCode": 200,
+                    "body": {"status": "max_retries_reached", "user_id": user_id},
+                }
+        else:
+            # Initial call - check if successful call already made
+            if user_state.daily_call_made and user_state.call_successful:
+                logger.info("Daily call already successful via user state")
+                return {
+                    "statusCode": 200,
+                    "body": {"status": "already_called", "user_id": user_id},
+                }
 
         # Check snooze
         if user_state.snooze_until:
@@ -139,7 +190,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
                 phone_number = get_parameter("/kairos/user-phone-number", decrypt=False)
             except Exception:
                 logger.error("No phone number configured for user")
-                call_dedup.release_call_batch(user_id, date_str)
+                release_func()
                 return {
                     "statusCode": 400,
                     "body": {"status": "error", "message": "No phone number configured"},
@@ -191,7 +242,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     except Exception:
         logger.exception("Failed to initiate call")
         # Release idempotency key so it can be retried
-        call_dedup.release_call_batch(user_id, date_str)
+        release_func()
         raise
 
 
