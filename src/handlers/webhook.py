@@ -30,6 +30,21 @@ logger = Logger(service="kairos-webhook")
 RETRY_DELAY_MINUTES = 15
 MAX_RETRIES = 3
 
+# Cached account ID
+_account_id: str | None = None
+
+
+def _get_account_id() -> str:
+    """Get AWS account ID from STS (cached)."""
+    global _account_id
+    if _account_id is None:
+        import boto3
+
+        sts = boto3.client("sts")
+        _account_id = sts.get_caller_identity()["Account"]
+    return _account_id
+
+
 # Voicemail detection keywords
 VOICEMAIL_KEYWORDS = [
     "voicemail",
@@ -269,7 +284,13 @@ def _handle_unsuccessful_call(
 
     try:
         # Get scheduler config
-        prompt_sender_arn = os.environ.get("PROMPT_SENDER_LAMBDA_ARN", "")
+        # Construct ARN from function name to avoid circular dependency in CDK
+        prompt_sender_fn_name = os.environ.get(
+            "PROMPT_SENDER_FUNCTION_NAME", "kairos-prompt-sender"
+        )
+        region = os.environ.get("AWS_REGION", "eu-west-1")
+        account_id = _get_account_id()
+        prompt_sender_arn = f"arn:aws:lambda:{region}:{account_id}:function:{prompt_sender_fn_name}"
         scheduler_role_arn = os.environ.get("SCHEDULER_ROLE_ARN", "")
 
         if not prompt_sender_arn or not scheduler_role_arn:

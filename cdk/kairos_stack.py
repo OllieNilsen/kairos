@@ -437,10 +437,11 @@ class KairosStack(Stack):
         # SLICE 2 MVP: Webhook Retry Support
         # ========================================
         # Add retry-related environment variables to webhook Lambda
-        # (must be done after dependent resources are created)
+        # Note: We use function name instead of ARN to avoid circular dependency
+        # (prompt_sender references webhook_url, webhook needs prompt_sender ARN)
         webhook_fn.add_environment("USER_STATE_TABLE", user_state_table.table_name)
         webhook_fn.add_environment("IDEMPOTENCY_TABLE", idempotency_table.table_name)
-        webhook_fn.add_environment("PROMPT_SENDER_LAMBDA_ARN", prompt_sender_fn.function_arn)
+        webhook_fn.add_environment("PROMPT_SENDER_FUNCTION_NAME", "kairos-prompt-sender")
         webhook_fn.add_environment("SCHEDULER_ROLE_ARN", scheduler_role.role_arn)
 
         # Grant webhook Lambda access to user state and idempotency tables
