@@ -14,7 +14,9 @@ from pydantic import ValidationError
 try:
     from adapters.anthropic_client import AnthropicSummarizer
     from adapters.dynamodb import CallDeduplicator
+    from adapters.google_calendar import GoogleCalendarClient
     from adapters.idempotency import CallRetryDedup
+    from adapters.meetings_repo import MeetingsRepository
     from adapters.scheduler import SchedulerClient, make_retry_schedule_name
     from adapters.ses import SESPublisher
     from adapters.ssm import get_parameter
@@ -25,7 +27,9 @@ try:
 except ImportError:
     from src.adapters.anthropic_client import AnthropicSummarizer
     from src.adapters.dynamodb import CallDeduplicator
+    from src.adapters.google_calendar import GoogleCalendarClient
     from src.adapters.idempotency import CallRetryDedup
+    from src.adapters.meetings_repo import MeetingsRepository
     from src.adapters.scheduler import SchedulerClient, make_retry_schedule_name
     from src.adapters.ses import SESPublisher
     from src.adapters.ssm import get_parameter
@@ -77,6 +81,8 @@ _deduplicator: CallDeduplicator | None = None
 _user_repo: UserStateRepository | None = None
 _retry_dedup: CallRetryDedup | None = None
 _scheduler: SchedulerClient | None = None
+_meetings_repo: MeetingsRepository | None = None
+_calendar: GoogleCalendarClient | None = None
 
 
 def get_anthropic() -> AnthropicSummarizer:
@@ -137,6 +143,29 @@ def get_scheduler() -> SchedulerClient:
     if _scheduler is None:
         _scheduler = SchedulerClient()
     return _scheduler
+
+
+def get_meetings_repo() -> MeetingsRepository | None:
+    """Get or create the meetings repository."""
+    global _meetings_repo
+    table_name = os.environ.get("MEETINGS_TABLE")
+    if not table_name:
+        return None
+    if _meetings_repo is None:
+        _meetings_repo = MeetingsRepository(table_name)
+    return _meetings_repo
+
+
+def get_calendar() -> GoogleCalendarClient | None:
+    """Get or create the Google Calendar client."""
+    global _calendar
+    if _calendar is None:
+        try:
+            _calendar = GoogleCalendarClient.from_ssm()
+        except Exception as e:
+            logger.warning("Could not initialize Google Calendar client", extra={"error": str(e)})
+            return None
+    return _calendar
 
 
 @logger.inject_lambda_context
@@ -378,9 +407,43 @@ def _handle_successful_call(
     """
     # Mark call as successful in user state
     user_repo = get_user_repo()
+    user_state = None
     if user_repo:
         user_repo.record_call_success(user_id)
         user_repo.clear_retry_schedule(user_id)
+        user_state = user_repo.get_user_state(user_id)
+
+    # Mark meetings as debriefed
+    metadata = payload.variables.get("metadata", payload.variables)
+    meeting_ids = metadata.get("meeting_ids", [])
+    if meeting_ids:
+        meetings_repo = get_meetings_repo()
+        if meetings_repo:
+            meetings_repo.mark_debriefed(user_id, meeting_ids)
+            logger.info(
+                "Marked meetings as debriefed",
+                extra={"count": len(meeting_ids), "meeting_ids": meeting_ids},
+            )
+
+    # Delete or complete the debrief calendar event
+    if user_state and user_state.debrief_event_id:
+        calendar = get_calendar()
+        if calendar:
+            try:
+                calendar.delete_event(user_state.debrief_event_id)
+                logger.info(
+                    "Deleted debrief calendar event",
+                    extra={"event_id": user_state.debrief_event_id},
+                )
+                # Clear debrief event from user state
+                if user_repo:
+                    user_repo.clear_debrief_event(user_id)
+            except Exception as e:
+                # Non-fatal - event may already be deleted
+                logger.warning(
+                    "Could not delete debrief event",
+                    extra={"event_id": user_state.debrief_event_id, "error": str(e)},
+                )
 
     # Extract event context from variables (passed through from trigger)
     event_context = _extract_event_context(payload)

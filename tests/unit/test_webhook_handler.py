@@ -204,3 +204,142 @@ class TestWebhookHandler:
 
         assert response["statusCode"] == 200
         assert json.loads(response["body"])["status"] == "duplicate"
+
+
+class TestHandleSuccessfulCall:
+    """Tests for _handle_successful_call function."""
+
+    def test_marks_meetings_debriefed(self) -> None:
+        """Should mark meetings as debriefed when meeting_ids present."""
+        from src.handlers.webhook import _handle_successful_call
+
+        payload = MagicMock()
+        payload.variables = {
+            "meeting_ids": ["meeting-1", "meeting-2"],
+            "user_id": "user-001",
+        }
+        payload.concatenated_transcript = "Test transcript"
+
+        mock_user_repo = MagicMock()
+        mock_user_repo.get_user_state.return_value = MagicMock(debrief_event_id=None)
+
+        mock_meetings_repo = MagicMock()
+        mock_anthropic = MagicMock()
+        mock_anthropic.summarize.return_value = "Summary"
+        mock_ses = MagicMock()
+        mock_ses.send_email.return_value = "msg-123"
+
+        with (
+            patch("src.handlers.webhook.get_user_repo", return_value=mock_user_repo),
+            patch("src.handlers.webhook.get_meetings_repo", return_value=mock_meetings_repo),
+            patch("src.handlers.webhook.get_calendar", return_value=None),
+            patch("src.handlers.webhook.get_anthropic", return_value=mock_anthropic),
+            patch("src.handlers.webhook.get_ses", return_value=mock_ses),
+            patch.dict("os.environ", {"RECIPIENT_EMAIL": "test@example.com"}),
+        ):
+            result = _handle_successful_call(payload, "user-001")
+
+        mock_meetings_repo.mark_debriefed.assert_called_once_with(
+            "user-001", ["meeting-1", "meeting-2"]
+        )
+        assert result["statusCode"] == 200
+
+    def test_deletes_debrief_calendar_event(self) -> None:
+        """Should delete debrief calendar event on success."""
+        from src.core.models import UserState
+        from src.handlers.webhook import _handle_successful_call
+
+        payload = MagicMock()
+        payload.variables = {}
+        payload.concatenated_transcript = "Test transcript"
+
+        user_state = UserState(user_id="user-001", debrief_event_id="event-123")
+        mock_user_repo = MagicMock()
+        mock_user_repo.get_user_state.return_value = user_state
+
+        mock_calendar = MagicMock()
+        mock_anthropic = MagicMock()
+        mock_anthropic.summarize.return_value = "Summary"
+        mock_ses = MagicMock()
+        mock_ses.send_email.return_value = "msg-123"
+
+        with (
+            patch("src.handlers.webhook.get_user_repo", return_value=mock_user_repo),
+            patch("src.handlers.webhook.get_meetings_repo", return_value=None),
+            patch("src.handlers.webhook.get_calendar", return_value=mock_calendar),
+            patch("src.handlers.webhook.get_anthropic", return_value=mock_anthropic),
+            patch("src.handlers.webhook.get_ses", return_value=mock_ses),
+            patch.dict("os.environ", {"RECIPIENT_EMAIL": "test@example.com"}),
+        ):
+            result = _handle_successful_call(payload, "user-001")
+
+        mock_calendar.delete_event.assert_called_once_with("event-123")
+        mock_user_repo.clear_debrief_event.assert_called_once_with("user-001")
+        assert result["statusCode"] == 200
+
+    def test_handles_calendar_delete_failure_gracefully(self) -> None:
+        """Should continue if calendar event deletion fails."""
+        from src.core.models import UserState
+        from src.handlers.webhook import _handle_successful_call
+
+        payload = MagicMock()
+        payload.variables = {}
+        payload.concatenated_transcript = "Test transcript"
+
+        user_state = UserState(user_id="user-001", debrief_event_id="event-123")
+        mock_user_repo = MagicMock()
+        mock_user_repo.get_user_state.return_value = user_state
+
+        mock_calendar = MagicMock()
+        mock_calendar.delete_event.side_effect = Exception("Calendar API error")
+
+        mock_anthropic = MagicMock()
+        mock_anthropic.summarize.return_value = "Summary"
+        mock_ses = MagicMock()
+        mock_ses.send_email.return_value = "msg-123"
+
+        with (
+            patch("src.handlers.webhook.get_user_repo", return_value=mock_user_repo),
+            patch("src.handlers.webhook.get_meetings_repo", return_value=None),
+            patch("src.handlers.webhook.get_calendar", return_value=mock_calendar),
+            patch("src.handlers.webhook.get_anthropic", return_value=mock_anthropic),
+            patch("src.handlers.webhook.get_ses", return_value=mock_ses),
+            patch.dict("os.environ", {"RECIPIENT_EMAIL": "test@example.com"}),
+        ):
+            result = _handle_successful_call(payload, "user-001")
+
+        # Should still succeed even if calendar delete fails
+        assert result["statusCode"] == 200
+        mock_ses.send_email.assert_called_once()
+
+    def test_skips_cleanup_when_no_debrief_event(self) -> None:
+        """Should skip calendar cleanup when no debrief event exists."""
+        from src.core.models import UserState
+        from src.handlers.webhook import _handle_successful_call
+
+        payload = MagicMock()
+        payload.variables = {}
+        payload.concatenated_transcript = "Test transcript"
+
+        user_state = UserState(user_id="user-001", debrief_event_id=None)
+        mock_user_repo = MagicMock()
+        mock_user_repo.get_user_state.return_value = user_state
+
+        mock_calendar = MagicMock()
+        mock_anthropic = MagicMock()
+        mock_anthropic.summarize.return_value = "Summary"
+        mock_ses = MagicMock()
+        mock_ses.send_email.return_value = "msg-123"
+
+        with (
+            patch("src.handlers.webhook.get_user_repo", return_value=mock_user_repo),
+            patch("src.handlers.webhook.get_meetings_repo", return_value=None),
+            patch("src.handlers.webhook.get_calendar", return_value=mock_calendar),
+            patch("src.handlers.webhook.get_anthropic", return_value=mock_anthropic),
+            patch("src.handlers.webhook.get_ses", return_value=mock_ses),
+            patch.dict("os.environ", {"RECIPIENT_EMAIL": "test@example.com"}),
+        ):
+            result = _handle_successful_call(payload, "user-001")
+
+        mock_calendar.delete_event.assert_not_called()
+        assert result["statusCode"] == 200
