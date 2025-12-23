@@ -342,6 +342,20 @@ class KairosStack(Stack):
             )
         )
 
+        # === CloudWatch Alarm for Prompt Sender Errors ===
+        prompt_sender_errors = prompt_sender_fn.metric_errors(period=Duration.minutes(5))
+        prompt_sender_alarm = cloudwatch.Alarm(
+            self,
+            "PromptSenderErrorAlarm",
+            metric=prompt_sender_errors,
+            threshold=1,
+            evaluation_periods=1,
+            alarm_description="Kairos prompt sender Lambda errors",
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+        prompt_sender_alarm.add_alarm_action(cw_actions.SnsAction(alarm_topic))
+
         # === IAM Role for EventBridge Scheduler ===
         scheduler_role = iam.Role(
             self,
@@ -484,6 +498,30 @@ class KairosStack(Stack):
             iam.PolicyStatement(
                 actions=["iam:PassRole"],
                 resources=[scheduler_role.role_arn],
+            )
+        )
+
+        # Grant webhook Lambda permission to get caller identity (for account ID)
+        webhook_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["sts:GetCallerIdentity"],
+                resources=["*"],
+            )
+        )
+
+        # Add meetings table access for marking meetings debriefed
+        webhook_fn.add_environment("MEETINGS_TABLE", meetings_table.table_name)
+        meetings_table.grant_read_write_data(webhook_fn)
+
+        # Add Google Calendar SSM access for deleting debrief event
+        webhook_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["ssm:GetParameter"],
+                resources=[
+                    f"arn:aws:ssm:{self.region}:{self.account}:parameter{SSM_GOOGLE_CLIENT_ID}",
+                    f"arn:aws:ssm:{self.region}:{self.account}:parameter{SSM_GOOGLE_CLIENT_SECRET}",
+                    f"arn:aws:ssm:{self.region}:{self.account}:parameter{SSM_GOOGLE_REFRESH_TOKEN}",
+                ],
             )
         )
 
