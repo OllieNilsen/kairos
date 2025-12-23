@@ -10,16 +10,29 @@ from typing import TYPE_CHECKING, Any
 from aws_lambda_powertools import Logger
 from pydantic import ValidationError
 
-from adapters.anthropic_client import AnthropicSummarizer
-from adapters.dynamodb import CallDeduplicator
-from adapters.idempotency import CallRetryDedup
-from adapters.scheduler import SchedulerClient, make_retry_schedule_name
-from adapters.ses import SESPublisher
-from adapters.ssm import get_parameter
-from adapters.user_state import UserStateRepository
-from adapters.webhook_verify import verify_bland_signature
-from core.models import BlandWebhookPayload, EventContext
-from core.prompts import build_summarization_prompt
+# Support both Lambda (adapters...) and test (src.adapters...) import paths
+try:
+    from adapters.anthropic_client import AnthropicSummarizer
+    from adapters.dynamodb import CallDeduplicator
+    from adapters.idempotency import CallRetryDedup
+    from adapters.scheduler import SchedulerClient, make_retry_schedule_name
+    from adapters.ses import SESPublisher
+    from adapters.ssm import get_parameter
+    from adapters.user_state import UserStateRepository
+    from adapters.webhook_verify import verify_bland_signature
+    from core.models import BlandWebhookPayload, EventContext
+    from core.prompts import build_summarization_prompt
+except ImportError:
+    from src.adapters.anthropic_client import AnthropicSummarizer
+    from src.adapters.dynamodb import CallDeduplicator
+    from src.adapters.idempotency import CallRetryDedup
+    from src.adapters.scheduler import SchedulerClient, make_retry_schedule_name
+    from src.adapters.ses import SESPublisher
+    from src.adapters.ssm import get_parameter
+    from src.adapters.user_state import UserStateRepository
+    from src.adapters.webhook_verify import verify_bland_signature
+    from src.core.models import BlandWebhookPayload, EventContext
+    from src.core.prompts import build_summarization_prompt
 
 if TYPE_CHECKING:
     from aws_lambda_powertools.utilities.typing import LambdaContext

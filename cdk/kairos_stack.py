@@ -433,6 +433,22 @@ class KairosStack(Stack):
             )
         )
 
+        # Add environment variables for debrief event change detection
+        calendar_webhook_fn.add_environment("USER_STATE_TABLE", user_state_table.table_name)
+        calendar_webhook_fn.add_environment("SCHEDULER_ROLE_ARN", scheduler_role.role_arn)
+        calendar_webhook_fn.add_environment("PROMPT_SENDER_FUNCTION_NAME", "kairos-prompt-sender")
+
+        # Grant calendar webhook access to user state table
+        user_state_table.grant_read_write_data(calendar_webhook_fn)
+
+        # Grant STS access for getting account ID
+        calendar_webhook_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["sts:GetCallerIdentity"],
+                resources=["*"],
+            )
+        )
+
         # ========================================
         # SLICE 2 MVP: Webhook Retry Support
         # ========================================

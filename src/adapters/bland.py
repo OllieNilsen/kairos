@@ -14,7 +14,8 @@ if TYPE_CHECKING:
 # Rosalie: British female voice - "A young female British speaker"
 # Voice ID from Bland AI voice library
 DEFAULT_VOICE = os.environ.get(
-    "BLAND_VOICE_ID", "a710fd26-0ed7-48e8-86b3-0d4e52d4f500"  # Rosalie - British Female
+    "BLAND_VOICE_ID",
+    "a710fd26-0ed7-48e8-86b3-0d4e52d4f500",  # Rosalie - British Female
 )
 
 

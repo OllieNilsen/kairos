@@ -9,10 +9,17 @@ from typing import TYPE_CHECKING, Any
 from aws_lambda_powertools import Logger
 from pydantic import ValidationError
 
-from adapters.bland import BlandClient
-from adapters.ssm import get_parameter
-from core.models import TriggerPayload, TriggerResponse
-from core.prompts import build_debrief_system_prompt
+# Support both Lambda (adapters...) and test (src.adapters...) import paths
+try:
+    from adapters.bland import BlandClient
+    from adapters.ssm import get_parameter
+    from core.models import TriggerPayload, TriggerResponse
+    from core.prompts import build_debrief_system_prompt
+except ImportError:
+    from src.adapters.bland import BlandClient
+    from src.adapters.ssm import get_parameter
+    from src.core.models import TriggerPayload, TriggerResponse
+    from src.core.prompts import build_debrief_system_prompt
 
 if TYPE_CHECKING:
     from aws_lambda_powertools.utilities.typing import LambdaContext

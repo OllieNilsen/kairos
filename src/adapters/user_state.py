@@ -267,6 +267,32 @@ class UserStateRepository:
             ExpressionAttributeValues={":null": None},
         )
 
+    def update_debrief_event(
+        self,
+        user_id: str,
+        debrief_event_id: str,
+        debrief_event_etag: str | None = None,
+    ) -> None:
+        """Update debrief event info (etag changed, or event modified).
+
+        Args:
+            user_id: The user identifier
+            debrief_event_id: Google Calendar event ID
+            debrief_event_etag: New etag from Google
+        """
+        update_expr = "SET debrief_event_id = :event_id"
+        expr_values: dict[str, Any] = {":event_id": debrief_event_id}
+
+        if debrief_event_etag is not None:
+            update_expr += ", debrief_event_etag = :etag"
+            expr_values[":etag"] = debrief_event_etag
+
+        self.table.update_item(
+            Key={"user_id": user_id},
+            UpdateExpression=update_expr,
+            ExpressionAttributeValues=expr_values,
+        )
+
     def can_prompt(self, state: UserState | None) -> tuple[bool, str]:
         """Check if we can send a prompt to the user.
 

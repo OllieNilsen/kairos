@@ -156,9 +156,7 @@ class TestUserStateRepository:
         expr_values = call_args[1]["ExpressionAttributeValues"]
         assert expr_values[":stop"] is True
 
-    def test_record_call_success(
-        self, repo: UserStateRepository, mock_table: MagicMock
-    ) -> None:
+    def test_record_call_success(self, repo: UserStateRepository, mock_table: MagicMock) -> None:
         """Should set call_successful to True."""
         repo.record_call_success("user-001")
 
@@ -168,9 +166,37 @@ class TestUserStateRepository:
         expr_values = call_args[1]["ExpressionAttributeValues"]
         assert expr_values[":true"] is True
 
-    def test_record_retry_scheduled(
+    def test_update_debrief_event(self, repo: UserStateRepository, mock_table: MagicMock) -> None:
+        """Should update debrief event ID and etag."""
+        repo.update_debrief_event(
+            user_id="user-001",
+            debrief_event_id="event-123",
+            debrief_event_etag="etag-456",
+        )
+
+        mock_table.update_item.assert_called_once()
+        call_args = mock_table.update_item.call_args
+        assert call_args[1]["Key"] == {"user_id": "user-001"}
+        expr_values = call_args[1]["ExpressionAttributeValues"]
+        assert expr_values[":event_id"] == "event-123"
+        assert expr_values[":etag"] == "etag-456"
+
+    def test_update_debrief_event_without_etag(
         self, repo: UserStateRepository, mock_table: MagicMock
     ) -> None:
+        """Should update debrief event ID without etag."""
+        repo.update_debrief_event(
+            user_id="user-001",
+            debrief_event_id="event-123",
+        )
+
+        mock_table.update_item.assert_called_once()
+        call_args = mock_table.update_item.call_args
+        expr_values = call_args[1]["ExpressionAttributeValues"]
+        assert expr_values[":event_id"] == "event-123"
+        assert ":etag" not in expr_values
+
+    def test_record_retry_scheduled(self, repo: UserStateRepository, mock_table: MagicMock) -> None:
         """Should update retry state fields."""
         repo.record_retry_scheduled(
             user_id="user-001",
@@ -185,9 +211,7 @@ class TestUserStateRepository:
         assert expr_values[":next_retry"] == "2024-01-15T18:00:00Z"
         assert expr_values[":schedule_name"] == "kairos-retry-user-001-2024-01-15-1"
 
-    def test_clear_retry_schedule(
-        self, repo: UserStateRepository, mock_table: MagicMock
-    ) -> None:
+    def test_clear_retry_schedule(self, repo: UserStateRepository, mock_table: MagicMock) -> None:
         """Should clear retry schedule fields."""
         repo.clear_retry_schedule("user-001")
 
@@ -197,9 +221,7 @@ class TestUserStateRepository:
         expr_values = call_args[1]["ExpressionAttributeValues"]
         assert expr_values[":null"] is None
 
-    def test_can_retry_returns_true_when_allowed(
-        self, repo: UserStateRepository
-    ) -> None:
+    def test_can_retry_returns_true_when_allowed(self, repo: UserStateRepository) -> None:
         """Should return True when retry is allowed."""
         state = UserState(
             user_id="user-001",
@@ -213,9 +235,7 @@ class TestUserStateRepository:
         assert can_retry is True
         assert reason == "ok"
 
-    def test_can_retry_returns_false_when_call_successful(
-        self, repo: UserStateRepository
-    ) -> None:
+    def test_can_retry_returns_false_when_call_successful(self, repo: UserStateRepository) -> None:
         """Should return False when call already successful."""
         state = UserState(
             user_id="user-001",
@@ -228,9 +248,7 @@ class TestUserStateRepository:
         assert can_retry is False
         assert reason == "call_already_successful"
 
-    def test_can_retry_returns_false_when_max_reached(
-        self, repo: UserStateRepository
-    ) -> None:
+    def test_can_retry_returns_false_when_max_reached(self, repo: UserStateRepository) -> None:
         """Should return False when max retries reached."""
         state = UserState(
             user_id="user-001",
@@ -243,9 +261,7 @@ class TestUserStateRepository:
         assert can_retry is False
         assert reason == "max_retries_reached"
 
-    def test_can_retry_returns_false_when_stopped(
-        self, repo: UserStateRepository
-    ) -> None:
+    def test_can_retry_returns_false_when_stopped(self, repo: UserStateRepository) -> None:
         """Should return False when user is stopped."""
         state = UserState(
             user_id="user-001",
