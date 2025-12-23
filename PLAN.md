@@ -260,9 +260,13 @@ A predictable, low-annoyance approach to calendar-driven debriefs. We intentiona
 
 [Call completes]
   → Existing Bland webhook pipeline summarizes
-  → Meetings marked debriefed
-  → Summary sent via SMS (Twilio) (optionally also email later)
-  → Debrief calendar event deleted or marked completed
+  → If call unsuccessful (voicemail, no answer, dropped):
+    → If retries_today < 3: schedule retry in 15 minutes
+    → Else: give up for today, reset tomorrow
+  → If call successful:
+    → Meetings marked debriefed
+    → Summary sent via SMS (Twilio) (optionally also email later)
+    → Debrief calendar event deleted or marked completed
 ```
 
 ---
@@ -310,6 +314,7 @@ flowchart LR
   WEBHOOK --> MEET
   WEBHOOK --> USTATE
   WEBHOOK --> TWOUT
+  WEBHOOK -->|unsuccessful? retry in 15min| SCHED
 ```
 
 ---
@@ -333,9 +338,27 @@ These rules are enforced before sending SMS or initiating calls:
 
 1. If `stopped == true` → **never prompt/call**
 2. If `prompts_sent_today >= 1` → **never prompt again today**
-3. If `daily_call_made == true` → **never call again today**
+3. If `daily_call_made == true` AND `call_successful == true` → **never call again today**
 4. If `snooze_until > now` → **do not prompt/call**
 5. **No reminders by default** (single prompt/day, no follow-ups)
+6. If `retries_today >= 3` → **no more retries today** (give up gracefully)
+
+## Call Retry Logic
+
+When a call is unsuccessful (voicemail, no answer, dropped early), the system schedules automatic retries:
+
+| Condition | Action |
+|-----------|--------|
+| Call successful | Mark `call_successful=true`, process summary, done for today |
+| Call unsuccessful, `retries_today < 3` | Increment `retries_today`, schedule retry in **15 minutes** |
+| Call unsuccessful, `retries_today >= 3` | Give up for today, log failure, reset tomorrow |
+
+**Unsuccessful call detection** (from Bland webhook):
+- `status != "completed"` OR
+- `duration < 30` (call dropped/rejected) OR
+- transcript indicates voicemail (e.g., "leave a message", "voicemail")
+
+**Retry schedule naming**: `kairos-retry-{user_id}-{YYYY-MM-DD}-{retry_number}`
 
 ---
 
@@ -350,6 +373,7 @@ Single table with PK `idempotency_key` and TTL.
 - Outbound prompt SMS: `sms-send:{user_id}#{YYYY-MM-DD}`
 - Inbound SMS: `sms-in:{TwilioMessageSid}`
 - Daily call: `call-batch:{user_id}#{YYYY-MM-DD}`
+- Call retry: `call-retry:{user_id}#{YYYY-MM-DD}#{retry_number}`
 - Daily planner lease: `daily-plan:{user_id}#{YYYY-MM-DD}`
 - (Optional) Schedule reconciliation fence: `schedule:{user_id}#{YYYY-MM-DD}`
 
@@ -457,7 +481,11 @@ For MVP single-user, store the **Google refresh token in SSM**, not DynamoDB (av
 | `awaiting_reply` | Boolean | True after prompt |
 | `active_prompt_id` | String | e.g., `user_id#YYYY-MM-DD` |
 | `daily_call_made` | Boolean | True after initiating call |
+| `call_successful` | Boolean | True only if call completed successfully |
+| `retries_today` | Number | Count of retry attempts today (max 3) |
 | `last_call_at` | ISO8601 | When call initiated |
+| `next_retry_at` | ISO8601 | Scheduled retry time (if pending) |
+| `retry_schedule_name` | String | `kairos-retry-{user_id}-{YYYY-MM-DD}-{N}` |
 | `daily_batch_id` | String | `user_id#YYYY-MM-DD` |
 | `last_daily_reset` | ISO8601 | Daily reset timestamp |
 | `snooze_until` | ISO8601 | Snooze |
@@ -552,7 +580,7 @@ kairos/
   - `delete_schedule(name)` (best-effort)
 - [ ] Implement `daily_plan_prompt.py`:
   - Acquire `daily-plan:{user_id}#{YYYY-MM-DD}`
-  - Reset counters (`prompts_sent_today`, `daily_call_made`, etc.)
+  - Reset counters (`prompts_sent_today`, `daily_call_made`, `call_successful`, `retries_today`, `next_retry_at`, `retry_schedule_name`)
   - Compute today’s debrief time from `preferred_prompt_time` in `Europe/London`
   - Create/update the Google Calendar debrief event; store `debrief_event_id/etag`
   - Reconcile one-time schedule to fire at event time
@@ -582,19 +610,34 @@ kairos/
 - [ ] Add Lambda Function URL (or API Gateway) endpoint for Twilio inbound webhook
 - [ ] Configure Twilio messaging webhook URL
 
-### Phase 2F: Call Initiation Lambda (one-call/day batching)
-- [ ] Implement `initiate_daily_call.py`:
-  - Acquire `call-batch:{user_id}#{YYYY-MM-DD}`; if exists → exit
-  - Validate: not stopped, not snoozed, no prior call made today
+### Phase 2F: Call Initiation Lambda (one-call/day batching + retries)
+- [ ] Implement `initiate_daily_call.py` (also used for retries via `prompt_sender`):
+  - For initial call: acquire `call-batch:{user_id}#{YYYY-MM-DD}`; if exists → exit
+  - For retry: acquire `call-retry:{user_id}#{YYYY-MM-DD}#{retry_number}`; if exists → exit
+  - Validate: not stopped, not snoozed
+  - For initial call: check no prior successful call today (`call_successful != true`)
+  - For retry: check `retries_today < 3` and `call_successful != true`
   - Load all pending meetings for day; build multi-meeting call context
   - Initiate Bland call
   - Set `daily_call_made=true`, `last_call_at=now`, `daily_batch_id=...`
 
 ### Phase 2G: Post-Call Processing (extend existing webhook)
 - [ ] Update existing `webhook.py` to:
-  - Mark meetings debriefed
-  - Send summary via Twilio SMS (concise format)
-  - Delete or mark the debrief calendar event completed
+  - Detect unsuccessful calls:
+    - `status != "completed"` OR `duration < 30` OR transcript contains voicemail keywords
+  - If unsuccessful AND `retries_today < 3`:
+    - Increment `retries_today` in user state
+    - Schedule retry via EventBridge Scheduler in **15 minutes**
+    - Acquire `call-retry:{user_id}#{YYYY-MM-DD}#{retry_number}` idempotency key
+    - Store `retry_schedule_name` and `next_retry_at` in user state
+  - If unsuccessful AND `retries_today >= 3`:
+    - Log "max retries reached", reset tomorrow
+    - Optionally send notification that debrief couldn't be completed
+  - If successful:
+    - Mark `call_successful = true`
+    - Mark meetings debriefed
+    - Send summary via Twilio SMS (concise format)
+    - Delete or mark the debrief calendar event completed
   - Keep existing `call_id` webhook dedup logic
 
 ### Phase 2H: Testing & Polish
