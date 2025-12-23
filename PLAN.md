@@ -216,172 +216,131 @@ make clean
 
 ---
 
-# Slice 2: Smart Calendar-Driven Debriefs
+# Slice 2: Fixed-Time SMS Prompt Debriefs (MVP)
 
 ## Overview
 
-Automatically trigger debrief calls based on Google Calendar events, with intelligent batching and user-controlled timing.
+A simpler, predictable, low-annoyance approach to calendar-driven debriefs. Instead of complex gap detection with Step Functions, we use a fixed daily prompt time with event-driven SMS handling.
+
+### MVP Policy (Single User)
+
+- **One debrief call per day maximum**
+- **Ask-first via SMS** at a fixed scheduled time (configurable), NOT gap detection
+- **No reminders/nagging by default** - if user ignores SMS, do nothing until next day
+- **If user replies NO** - snooze until tomorrow (unless they text READY later)
+- **Inbound SMS can arrive anytime** (minutes/hours later) and must still work
 
 ### User Experience Flow
 
 ```
-[Back-to-back meetings end]
-    → [Gap detected - 15+ min free]
-    → SMS: "You had 3 meetings (Q4 Planning, 1:1 Sarah, Standup). Debrief call?"
-    → User replies: "yes" → Call initiates
-    → User replies: "no"  → "OK, ping me when ready"
-    → [User texts "ready" later] → Call initiates
+[8:00 AM] Daily planner runs
+    → Calculates today's prompt time (e.g., 5:30 PM)
+    → Creates/updates "Kairos Debrief" event in user's Google Calendar
+    → Resets daily counters
+    
+[User sees calendar event]
+    → Can move it to a different time (event has guestsCanModify: true)
+    → Can delete it to skip today's debrief
+    → Calendar webhook detects change → system reschedules prompt
+    
+[5:30 PM] Prompt sender checks
+    → Reads debrief event time from calendar (in case user moved it)
+    → "You had 3 meetings (Q4 Planning, 1:1 Sarah, Standup). Debrief call? Reply YES or NO"
+    
+[User replies anytime]
+    → "yes" / "ok" / "ready" → Call initiates immediately
+    → "no" / "skip" / "busy" → "OK, I'll check in tomorrow. Text READY if you change your mind."
+    → "stop" → Opt out of all future prompts
+    → [hours later] "ready" → Call still initiates (if no call made yet today)
+    
+[Call completes]
     → AI reviews each meeting sequentially
-    → Summary email sent
+    → Summary SMS sent via Twilio
+    → Meetings marked as debriefed
+    → Debrief calendar event marked as completed/deleted
 ```
 
 ### Key Design Decisions
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Calendar sync | **Google Push (Webhooks)** | Scalable for multi-user, real-time |
-| Orchestration | **Step Functions** | State machine, callbacks, timeouts built-in |
-| 2-way SMS | **Twilio** | SNS can't receive replies |
-| Meeting state | **DynamoDB** | Fast queries, SF reads fresh state each loop |
-| Execution model | **One SF per user per day** | Avoids duplicate prompts, clean lifecycle |
+| Calendar sync | **Google Push (Webhooks)** | Real-time meeting updates (reuse from Phase 2A) |
+| Debrief scheduling | **Calendar event (`guestsCanModify`)** | User can directly move event; webhook detects & reschedules |
+| Orchestration | **EventBridge Scheduler** | One-time triggers at exact time; no polling |
+| SMS (prompt + summary) | **Twilio** | Single channel for all notifications; immediate delivery |
+| State management | **DynamoDB** | User state + idempotency in one place |
+| Execution model | **Event-driven** | SMS webhook triggers call, no polling loops |
+| Idempotency | **Conditional writes** | Prevent duplicate prompts/calls even with retries |
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                              SLICE 2 ARCHITECTURE                           │
+│                         SLICE 2 MVP ARCHITECTURE                            │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  ┌──────────────┐      ┌─────────────────┐      ┌─────────────────┐         │
-│  │   Google     │─────►│ Calendar Webhook│─────►│   DynamoDB      │         │
-│  │  Calendar    │ push │    Lambda       │      │  (meetings)     │         │
-│  └──────────────┘      └─────────────────┘      └────────┬────────┘         │
-│                                                          │                  │
-│                                                          │ queries          │
-│  ┌──────────────┐      ┌─────────────────────────────────▼────────────────┐ │
-│  │ EventBridge  │─────►│            Step Function                         │ │
-│  │ (8am daily)  │start │         (Daily Debrief Orchestrator)             │ │
-│  └──────────────┘      │                                                  │ │
-│                        │  ┌─────────┐    ┌─────────┐    ┌──────────────┐  │ │
-│                        │  │ Check   │───►│ Wait &  │───►│ Prompt User  │  │ │
-│                        │  │Meetings │    │ Detect  │    │ (SMS)        │  │ │
-│                        │  └─────────┘    │ Gap     │    └──────┬───────┘  │ │
-│                        │                 └─────────┘           │          │ │
-│                        │                      ▲                │          │ │
-│                        │                      │                ▼          │ │
-│                        │                      │         ┌──────────────┐  │ │
-│                        │                      └─────────│Handle Reply  │  │ │
-│                        │                                │(yes/no/wait) │  │ │
-│                        │                                └──────┬───────┘  │ │
-│                        │                                       │          │ │
-│                        │                                       ▼          │ │
-│                        │                                ┌──────────────┐  │ │
-│                        │                                │Initiate Call │  │ │
-│                        │                                └──────────────┘  │ │
-│                        └──────────────────────────────────────────────────┘ │
-│                                          │                                  │
-│                        ┌─────────────────┼─────────────────┐                │
-│                        ▼                 ▼                 ▼                │
-│                 ┌────────────┐    ┌────────────┐    ┌────────────┐          │
-│                 │   Twilio   │    │  Bland AI  │    │    SES     │          │
-│                 │ (2-way SMS)│    │  (calls)   │    │  (email)   │          │
-│                 └────────────┘    └────────────┘    └────────────┘          │
+│                        ┌─────────────────────────────────────────┐          │
+│                        │            Google Calendar              │          │
+│                        │  (meetings + debrief scheduling event)  │          │
+│                        └────┬──────────────▲──────────────▲──────┘          │
+│                             │push          │create        │read             │
+│                             │              │event         │event            │
+│                             ▼              │              │                 │
+│                    ┌─────────────────┐     │              │                 │
+│                    │ Calendar Webhook│     │              │                 │
+│                    │ Lambda          │     │              │                 │
+│                    └────────┬────────┘     │              │                 │
+│                             │              │              │                 │
+│  ┌──────────────┐           │         ┌────┴────────┐     │                 │
+│  │ EventBridge  │──────────────────►  │ Daily Plan  │     │                 │
+│  │ (8am daily)  │           │         │ Lambda      │     │                 │
+│  └──────────────┘           │         └──────┬──────┘     │                 │
+│                             │                │            │                 │
+│                             ▼                ▼            │                 │
+│                    ┌─────────────────────────────────┐    │                 │
+│                    │          DynamoDB               │    │                 │
+│                    │  (meetings + user-state)        │    │                 │
+│                    └────────────────┬────────────────┘    │                 │
+│                                     │                     │                 │
+│                                     │                     │                 │
+│  EventBridge Scheduler              │                     │                 │
+│  (one-time at prompt time)          │                     │                 │
+│         │                           │                     │                 │
+│         ▼                           ▼                     │                 │
+│  ┌─────────────────┐─────────────────────────────────────►┘                 │
+│  │ Prompt Sender   │                                                        │
+│  │ Lambda          │────►  Twilio (outbound SMS)                            │
+│  └─────────────────┘                                                        │
+│                                                                             │
+│  Twilio ──────────►┌─────────────────┐────►┌─────────────────┐              │
+│  (inbound SMS)     │ SMS Webhook     │     │ Initiate Call   │              │
+│                    │ Lambda          │     │ Lambda          │              │
+│                    └─────────────────┘     └────────┬────────┘              │
+│                                                     │                       │
+│                                                     ▼                       │
+│                                            ┌─────────────────┐              │
+│                                            │ Bland AI        │              │
+│                                            │ (voice call)    │              │
+│                                            └────────┬────────┘              │
+│                                                     │                       │
+│                                                     ▼                       │
+│                                            ┌─────────────────┐              │
+│                                            │ Webhook Lambda  │──► Twilio    │
+│                                            │ (existing)      │   (SMS)      │
+│                                            └─────────────────┘              │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Step Function: Daily Debrief Orchestrator
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│              Daily Debrief Orchestrator (per user, per day)             │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│  START (triggered by EventBridge at 8am)                                │
-│    │                                                                    │
-│    ▼                                                                    │
-│  ┌──────────────────┐                                                   │
-│  │ CheckHasMeetings │ ── [No meetings today] ──► END                    │
-│  └────────┬─────────┘                                                   │
-│           │ [Has meetings]                                              │
-│           ▼                                                             │
-│  ┌────────────────────────────────────────────────────────────────┐     │
-│  │                        DAILY LOOP                              │     │
-│  │                                                                │     │
-│  │  ┌─────────────┐                                               │     │
-│  │  │ WaitForGap  │◄──────────────────────────────────────────┐   │     │
-│  │  │ (poll 5min) │                                           │   │     │
-│  │  └──────┬──────┘                                           │   │     │
-│  │         │                                                  │   │     │
-│  │    ┌────┴─────┬──────────────┐                             │   │     │
-│  │    ▼          ▼              ▼                             │   │     │
-│  │ [Gap +     [In mtg/      [Past EOD]                        │   │     │
-│  │  pending]   no pending]      │                             │   │     │
-│  │    │          │              ▼                             │   │     │
-│  │    │          └──────► [continue loop]              FinalCheck ──► END
-│  │    ▼                                                       │   │     │
-│  │ ┌────────────────┐                                         │   │     │
-│  │ │ SendPromptSMS  │  "3 meetings to debrief. Call now?"     │   │     │
-│  │ └───────┬────────┘                                         │   │     │
-│  │         │                                                  │   │     │
-│  │         ▼                                                  │   │     │
-│  │ ┌───────────────────────────────┐                          │   │     │
-│  │ │ WaitForReply                  │                          │   │     │
-│  │ │ (Task Token + 4hr timeout)    │                          │   │     │
-│  │ └───────┬───────────────┬───────┘                          │   │     │
-│  │         │               │                                  │   │     │
-│  │    [SMS Reply]     [Timeout]                               │   │     │
-│  │         │               │                                  │   │     │
-│  │         ▼               ▼                                  │   │     │
-│  │ ┌─────────────┐  ┌─────────────┐                           │   │     │
-│  │ │ChoiceState  │  │SendReminder │ "Still have meetings..."  │   │     │
-│  │ └──┬───┬───┬──┘  └──────┬──────┘                           │   │     │
-│  │    │   │   │            │                                  │   │     │
-│  │ "yes" "no" other        └──► [WaitForReply again]          │   │     │
-│  │    │   │   │                                               │   │     │
-│  │    │   │   └──► [Re-prompt: "Reply yes or no"]             │   │     │
-│  │    │   │                                                   │   │     │
-│  │    │   ▼                                                   │   │     │
-│  │    │ ┌────────────────────────────────┐                    │   │     │
-│  │    │ │ SendWaitingSMS                 │                    │   │     │
-│  │    │ │ "OK, ping me when ready"       │                    │   │     │
-│  │    │ └───────────┬────────────────────┘                    │   │     │
-│  │    │             │                                         │   │     │
-│  │    │             ▼                                         │   │     │
-│  │    │ ┌────────────────────────────────┐                    │   │     │
-│  │    │ │ WaitForUserPing                │                    │   │     │
-│  │    │ │ (until EOD or user texts)      │                    │   │     │
-│  │    │ └───────┬────────────────┬───────┘                    │   │     │
-│  │    │         │                │                            │   │     │
-│  │    │    [User pings]     [EOD timeout]                     │   │     │
-│  │    │         │                │                            │   │     │
-│  │    │         │                └──► FinalReminder ──────────┤   │     │
-│  │    │         │                                             │   │     │
-│  │    ▼         ▼                                             │   │     │
-│  │ ┌──────────────────┐                                       │   │     │
-│  │ │ CheckStillValid  │ ── [0 pending] ── SMS "All clear!" ───┘   │     │
-│  │ └────────┬─────────┘                                       │   │     │
-│  │          │ [>0 pending]                                    │   │     │
-│  │          ▼                                                 │   │     │
-│  │ ┌──────────────────┐                                       │   │     │
-│  │ │ InitiateBlandCall│ (multi-meeting context)               │   │     │
-│  │ └────────┬─────────┘                                       │   │     │
-│  │          │                                                 │   │     │
-│  │          ▼                                                 │   │     │
-│  │ ┌──────────────────┐                                       │   │     │
-│  │ │ MarkDebriefed    │ (update DynamoDB)                     │   │     │
-│  │ └────────┬─────────┘                                       │   │     │
-│  │          │                                                 │   │     │
-│  │          └─────────────────────────────────────────────────┘   │     │
-│  │                                                                │     │
-│  └────────────────────────────────────────────────────────────────┘     │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+**Key Calendar Interactions:**
+- **Daily Plan Lambda** → Creates "📞 Kairos Debrief" event at preferred prompt time (with `guestsCanModify: true`)
+- **Calendar Webhook** → Detects if user moves/deletes the debrief event → reschedules EventBridge
+- **Prompt Sender Lambda** → Double-checks event time before sending (belt & suspenders)
+- **Post-call** → Deletes or marks event as completed
 
 ## Data Model
 
-### DynamoDB: `kairos-meetings` Table
+### DynamoDB: `kairos-meetings` Table (existing)
 
 | Attribute | Type | Description |
 |-----------|------|-------------|
@@ -396,18 +355,76 @@ Automatically trigger debrief calls based on Google Calendar events, with intell
 | `created_at` | ISO8601 | When synced |
 | `ttl` | Number | Auto-cleanup after 30 days |
 
+**GSI (future-proof):**
+- GSI1PK = `user_id`
+- GSI1SK = `start_time` (or `start_time#meeting_id`)
+
 ### DynamoDB: `kairos-user-state` Table
 
 | Attribute | Type | Description |
 |-----------|------|-------------|
 | `user_id` | PK | User identifier |
+| **Contact Info** | | |
+| `phone_number` | String | For SMS prompts + summaries (E.164) |
+| `email` | String | Optional, for future use |
+| `timezone` | String | e.g., "Europe/London" |
+| **Scheduling** | | |
+| `preferred_prompt_time` | String | "17:30" (HH:MM format) |
+| `next_prompt_at` | ISO8601 | When to send today's prompt |
+| `prompt_schedule_name` | String | EventBridge Scheduler schedule name |
+| `debrief_event_id` | String | Google Calendar event ID for today's debrief |
+| `debrief_event_etag` | String | For detecting user modifications |
+| **Daily State** (reset each morning) | | |
+| `prompts_sent_today` | Number | Counter (max 1) |
+| `last_prompt_at` | ISO8601 | When last prompt was sent |
+| `awaiting_reply` | Boolean | True after prompt sent |
+| `active_prompt_id` | String | Current prompt identifier |
+| `daily_call_made` | Boolean | True after call initiated |
+| `last_call_at` | ISO8601 | When last call was made |
+| `daily_batch_id` | String | `user_id#YYYY-MM-DD` |
+| `last_daily_reset` | ISO8601 | When counters were reset |
+| **Control State** | | |
+| `snooze_until` | ISO8601 | Don't prompt/call until this time |
+| `stopped` | Boolean | User opted out (STOP) |
+| **Google OAuth** (existing) | | |
 | `google_refresh_token` | String (encrypted) | OAuth refresh token |
 | `google_channel_id` | String | Calendar push subscription ID |
 | `google_channel_expiry` | ISO8601 | When to renew subscription |
-| `phone_number` | String | For SMS (E.164) |
-| `email` | String | For summaries |
-| `timezone` | String | e.g., "Europe/London" |
-| `settings` | Map | Preferences (gap threshold, EOD hour, etc.) |
+
+### DynamoDB: `kairos-idempotency` Table
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `idempotency_key` | PK | Unique operation key |
+| `created_at` | ISO8601 | When acquired |
+| `metadata` | Map | Optional context |
+| `ttl` | Number | Auto-cleanup (7 days) |
+
+**Key Formats:**
+- SMS send dedup: `sms-send:{user_id}#{YYYY-MM-DD}`
+- Inbound SMS dedup: `sms-in:{MessageSid}`
+- Call batch dedup: `call-batch:{user_id}#{YYYY-MM-DD}`
+- Daily lease: `daily-plan:{user_id}#{YYYY-MM-DD}`
+
+## Budget & Safety Rules
+
+### Hard Rules (enforced in code)
+
+1. **If `stopped = true`** → Never prompt or call
+2. **If `prompts_sent_today >= 1`** → Never prompt again today
+3. **If `daily_call_made = true`** → Never call again today
+4. **If `snooze_until` is in the future** → Don't prompt or call
+5. **No reminders by default** → Single prompt per day, no follow-ups
+
+### Intent Parsing
+
+| User Says | Intent | Action |
+|-----------|--------|--------|
+| yes, yeah, yep, ok, okay, sure, call, go | `YES` | Initiate call |
+| ready, i'm ready, now | `READY` | Clear snooze, initiate call |
+| no, nope, nah, later, skip, busy | `NO` | Snooze until tomorrow |
+| stop, unsubscribe, quit, cancel | `STOP` | Set `stopped = true`, never contact again |
+| (anything else) | `UNKNOWN` | Reply with help message |
 
 ## New Project Structure (Additions)
 
@@ -416,82 +433,139 @@ kairos/
 ├── src/
 │   ├── adapters/
 │   │   ├── ... (existing)
-│   │   ├── google_calendar.py    # OAuth + Calendar API
-│   │   ├── twilio_sms.py         # Send/receive SMS
-│   │   └── step_functions.py     # SF task token callbacks
+│   │   ├── google_calendar.py    # OAuth + Calendar API (existing)
+│   │   ├── twilio_sms.py         # Send SMS + validate webhook signature
+│   │   ├── user_state.py         # DynamoDB user state repository
+│   │   └── idempotency.py        # Dedup helpers (SMS, calls, leases)
+│   ├── core/
+│   │   ├── models.py             # Add UserState, TwilioInboundSMS models
+│   │   └── prompts.py            # Add multi-meeting debrief prompt
 │   ├── handlers/
 │   │   ├── ... (existing)
-│   │   ├── calendar_webhook.py   # Google push notifications
-│   │   ├── sms_webhook.py        # Twilio inbound SMS
-│   │   ├── gap_detector.py       # SF task: check for gaps
-│   │   ├── send_prompt.py        # SF task: send SMS prompt
-│   │   └── initiate_call.py      # SF task: start Bland call
-│   └── state_machine/
-│       └── daily_orchestrator.asl.json  # Step Function definition
+│   │   ├── calendar_webhook.py   # Google push notifications (existing)
+│   │   ├── daily_plan_prompt.py  # 8am daily planner
+│   │   ├── prompt_sender.py      # Check time & send SMS prompt
+│   │   ├── sms_webhook.py        # Twilio inbound SMS handler
+│   │   └── initiate_daily_call.py # Start Bland call with all pending meetings
 ├── cdk/
-│   ├── kairos_stack.py           # Slice 1 resources
-│   └── kairos_slice2_stack.py    # Slice 2 resources (or extend existing)
+│   └── kairos_stack.py           # Add new tables, Lambdas, schedules
 ```
 
 ## Implementation Phases
 
-### Phase 2A: Google Calendar Integration
-- [ ] Create Google Cloud project & OAuth credentials
-- [ ] Implement `google_calendar.py` adapter (OAuth2 + Calendar API)
-- [ ] Create `calendar_webhook.py` Lambda handler
-- [ ] Create `kairos-meetings` DynamoDB table
-- [ ] Sync calendar events → DynamoDB on webhook
-- [ ] Handle webhook verification (Google challenge)
-- [ ] Setup calendar push subscription (watch)
-- [ ] Store refresh token in SSM (encrypted)
-- [ ] Add CDK resources (Lambda, DynamoDB, Function URL)
-- [ ] Manual test: Add/edit/delete calendar events, verify DynamoDB sync
+### Phase 2A: Google Calendar Integration ✅ COMPLETE
+- [x] Create Google Cloud project & OAuth credentials
+- [x] Implement `google_calendar.py` adapter (OAuth2 + Calendar API)
+- [x] Create `calendar_webhook.py` Lambda handler
+- [x] Create `kairos-meetings` DynamoDB table
+- [x] Sync calendar events → DynamoDB on webhook
+- [x] Handle webhook verification (Google challenge)
+- [x] Setup calendar push subscription (watch)
+- [x] Store refresh token in SSM (encrypted)
+- [x] Add CDK resources (Lambda, DynamoDB, Function URL)
 
-### Phase 2B: Step Function Orchestrator
-- [ ] Define Step Function ASL (daily_orchestrator.asl.json)
-- [ ] Create EventBridge rule (8am weekdays, user timezone)
-- [ ] Implement `gap_detector.py` (query DynamoDB for gaps)
-- [ ] Add SF execution singleton logic (user_id + date)
+### Phase 2A.1: Debrief Event Change Detection (extends calendar webhook)
+- [ ] Enhance `calendar_webhook.py` to detect changes to the debrief event:
+  - Check if changed event ID matches `debrief_event_id` in user state
+  - **If event moved** → update `next_prompt_at` and reschedule EventBridge
+  - **If event deleted** → clear `debrief_event_id`, delete EventBridge schedule
+  - **If event time is in the past** → skip (too late to reschedule)
+- [ ] Grant calendar webhook permission to modify EventBridge Scheduler
+- [ ] This enables real-time response to user calendar changes
+
+### Phase 2B: User State & Idempotency Tables
 - [ ] Create `kairos-user-state` DynamoDB table
-- [ ] Add CDK resources (Step Function, EventBridge, IAM roles)
-- [ ] Manual test: Trigger SF, verify loop runs and detects gaps
+- [ ] Create `kairos-idempotency` DynamoDB table
+- [ ] Implement `user_state.py` adapter (read/update with conditionals)
+- [ ] Implement `idempotency.py` adapter (SMS dedup, call dedup, leases)
+- [ ] Add `UserState` model to `models.py`
+- [ ] Add CDK resources for new tables
 
-### Phase 2C: Twilio 2-Way SMS
-- [ ] Create Twilio account & phone number
-- [ ] Implement `twilio_sms.py` adapter (send + receive)
-- [ ] Create `sms_webhook.py` Lambda (Twilio inbound)
-- [ ] Implement SF task token callback flow
+### Phase 2C: Daily Planning Lambda
+- [ ] Implement `daily_plan_prompt.py` handler
+  - Reset daily counters (`prompts_sent_today`, `daily_call_made`)
+  - Calculate `next_prompt_at` from user timezone + preferred time
+  - **Create/update "Kairos Debrief" event in user's Google Calendar**
+    - Title: "📞 Kairos Debrief" (or configurable)
+    - Time: `next_prompt_at` (15-minute duration)
+    - Description: "Reply YES to the SMS to start your debrief call. Move this event to change the prompt time."
+    - **Set `guestsCanModify: true`** so user can directly move/edit the event
+    - Store `debrief_event_id` and `debrief_event_etag` in user state
+  - **Create EventBridge Scheduler one-time schedule** for `next_prompt_at`
+    - Target: Prompt Sender Lambda
+    - Name: `kairos-prompt-{user_id}-{date}` (for idempotency)
+    - Auto-delete after execution
+  - Delete any stale schedules from previous days
+  - Acquire daily lease to prevent duplicate runs
+- [ ] Add EventBridge rule (8am UTC daily)
+- [ ] Grant Lambda permission to create/delete EventBridge Scheduler schedules
+- [ ] Add CDK resources
+
+### Phase 2D: Prompt Sender Lambda
+- [ ] Implement `prompt_sender.py` handler
+  - **Invoked by EventBridge Scheduler at exact prompt time** (no polling)
+  - **Read debrief event from Google Calendar** (user may have moved it)
+    - If event deleted → skip today's prompt, delete the schedule
+    - If event moved → reschedule (create new schedule at new time)
+    - If event unchanged → proceed normally
+  - Check idempotency (SMS not already sent today)
+  - Get pending meetings from `kairos-meetings`
+  - If no pending meetings → skip prompt, optionally delete calendar event
+  - Send SMS via Twilio
+  - Update user state (`prompts_sent_today`, `awaiting_reply`)
+- [ ] Implement `twilio_sms.py` adapter (send SMS)
 - [ ] Store Twilio credentials in SSM
-- [ ] Add `send_prompt.py` SF task Lambda
-- [ ] Add CDK resources (Lambda, Function URL for Twilio webhook)
-- [ ] Manual test: SF sends SMS, user replies, SF resumes
+- [ ] Add CDK resources (Lambda only - no recurring schedule needed)
 
-### Phase 2D: Multi-Meeting Debrief Calls
-- [ ] Update prompts for sequential meeting review
-- [ ] Create `initiate_call.py` SF task Lambda
-- [ ] Pass multiple meetings context to Bland
-- [ ] Update `webhook.py` to mark meetings as debriefed
-- [ ] Handle call completion → update DynamoDB status
-- [ ] Manual test: Full flow with 3+ meetings batched
+### Phase 2E: SMS Webhook Handler
+- [ ] Implement `sms_webhook.py` handler
+  - Verify Twilio signature
+  - Deduplicate by MessageSid
+  - Parse intent (YES/READY/NO/STOP/UNKNOWN)
+  - Update user state accordingly
+  - Trigger call initiation for YES/READY
+- [ ] Implement `twilio_sms.py` webhook verification
+- [ ] Add Lambda Function URL for Twilio webhook
+- [ ] Configure Twilio webhook URL
+- [ ] Add CDK resources
 
-### Phase 2E: Edge Cases & Polish
-- [ ] Handle "no" → waiting state → user pings later
-- [ ] Pre-call validation (meetings still pending?)
-- [ ] EOD final reminder
-- [ ] Calendar subscription renewal (before expiry)
-- [ ] Handle calendar sync conflicts (etag)
-- [ ] Add CloudWatch alarms for SF failures
-- [ ] Add structured logging / X-Ray tracing
+### Phase 2F: Call Initiation Lambda
+- [ ] Implement `initiate_daily_call.py` handler
+  - Check call idempotency (`call-batch:{user_id}#{date}`)
+  - Get all pending meetings
+  - Build multi-meeting prompt
+  - Call Bland AI
+  - Record `daily_call_made = true`
+- [ ] Add `build_multi_meeting_debrief_prompt()` to `prompts.py`
+- [ ] Add CDK resources
+
+### Phase 2G: Post-Call Processing
+- [ ] Update `webhook.py` to:
+  - Mark meetings as debriefed in DynamoDB
+  - **Send summary via Twilio SMS** (instead of SES email)
+  - **Delete or update the debrief calendar event** (mark as completed)
+    - Option A: Delete the event (clean calendar)
+    - Option B: Update title to "✅ Kairos Debrief (completed)"
+- [ ] Add Twilio SSM permissions to webhook Lambda
+- [ ] Update summarization prompt for SMS format (concise)
+
+### Phase 2H: Testing & Polish
+- [ ] Unit tests for intent parsing
+- [ ] Unit tests for budget rules (can_prompt, can_call)
+- [ ] Unit tests for idempotency (conditional write behavior)
+- [ ] Integration test: multiple invocations don't double-send/double-call
+- [ ] Add CloudWatch alarms for new Lambdas
+- [ ] Manual end-to-end test
 
 ## Configuration (SSM Parameters)
 
 ```bash
-# Google OAuth (from Google Cloud Console)
+# Google OAuth (existing from Phase 2A)
 aws ssm put-parameter --name "/kairos/google-client-id" --value "xxx.apps.googleusercontent.com" --type String
 aws ssm put-parameter --name "/kairos/google-client-secret" --value "GOCSPX-xxx" --type SecureString
 aws ssm put-parameter --name "/kairos/google-refresh-token" --value "1//xxx" --type SecureString
 
-# Twilio
+# Twilio (new)
 aws ssm put-parameter --name "/kairos/twilio-account-sid" --value "ACxxx" --type String
 aws ssm put-parameter --name "/kairos/twilio-auth-token" --value "xxx" --type SecureString
 aws ssm put-parameter --name "/kairos/twilio-phone-number" --value "+1xxx" --type String
@@ -506,11 +580,16 @@ aws ssm put-parameter --name "/kairos/user-timezone" --value "Europe/London" --t
 | Service | Cost |
 |---------|------|
 | Google Calendar API | Free (within quota) |
-| Step Functions | ~$0.025 (Standard, ~1000 state transitions) |
-| Twilio SMS (send) | ~$0.05 (2-3 messages) |
-| Twilio SMS (receive) | ~$0.01 |
+| EventBridge Scheduler | < $0.001 (2 schedules: 8am + prompt time) |
+| Twilio SMS (send) | ~$0.02 (2 messages: prompt + summary) |
+| Twilio SMS (receive) | ~$0.01 (1 reply) |
 | Twilio Phone Number | ~$1/month |
 | DynamoDB | < $0.01 |
-| Lambda | < $0.01 |
+| Lambda | < $0.01 (3-4 invocations, no polling) |
 | Bland AI (1 call, 5 min) | ~$0.45 |
-| **Total** | **~$0.55/day + $1/month Twilio** |
+| **Total** | **~$0.48/day + $1/month Twilio** |
+
+**Savings vs original Slice 2 design:**
+- No Step Functions (~$0.025/day saved)
+- No SES email (simpler stack, single notification channel)
+- No polling (one-time schedules instead of every-5-min Lambda)

@@ -291,4 +291,3 @@ class KairosStack(Stack):
             value=calendar_webhook_url.url,
             description="Webhook URL for Google Calendar push notifications",
         )
-
