@@ -180,3 +180,137 @@ class TestExtractAttendeeNames:
         names = extract_attendee_names(event)
 
         assert names == []
+
+
+class TestGoogleCalendarClientEventMethods:
+    """Tests for create_event, update_event, delete_event methods."""
+
+    @pytest.fixture
+    def client(self):
+        """Create a client with test credentials."""
+        return GoogleCalendarClient(
+            client_id="test-client-id",
+            client_secret="test-client-secret",
+            refresh_token="test-refresh-token",
+        )
+
+    @patch("src.adapters.google_calendar.httpx.request")
+    @patch("src.adapters.google_calendar.httpx.post")
+    def test_create_event(self, mock_post, mock_request, client):
+        """Should create a calendar event."""
+        # Mock token refresh
+        mock_post.return_value.json.return_value = {
+            "access_token": "test-token",
+            "expires_in": 3600,
+        }
+
+        # Mock create response
+        mock_request.return_value.json.return_value = {
+            "id": "new-event-id",
+            "etag": '"abc123"',
+            "summary": "Test Event",
+        }
+
+        start = datetime(2025, 1, 15, 17, 30, tzinfo=UTC)
+        end = datetime(2025, 1, 15, 17, 45, tzinfo=UTC)
+
+        result = client.create_event(
+            summary="Test Event",
+            start_time=start,
+            end_time=end,
+            description="Test description",
+        )
+
+        assert result["id"] == "new-event-id"
+        mock_request.assert_called_once()
+        call_args = mock_request.call_args
+        assert call_args[0][0] == "POST"  # HTTP method
+        assert "events" in call_args[0][1]  # URL contains events
+
+    @patch("src.adapters.google_calendar.httpx.request")
+    @patch("src.adapters.google_calendar.httpx.post")
+    def test_create_event_with_extended_properties(self, mock_post, mock_request, client):
+        """Should include extended properties when provided."""
+        mock_post.return_value.json.return_value = {
+            "access_token": "test-token",
+            "expires_in": 3600,
+        }
+        mock_request.return_value.json.return_value = {"id": "event-id"}
+
+        start = datetime(2025, 1, 15, 17, 30, tzinfo=UTC)
+        end = datetime(2025, 1, 15, 17, 45, tzinfo=UTC)
+
+        client.create_event(
+            summary="Debrief",
+            start_time=start,
+            end_time=end,
+            extended_properties={
+                "private": {"kairos_type": "debrief", "kairos_user_id": "user-001"}
+            },
+        )
+
+        call_json = mock_request.call_args.kwargs["json"]
+        assert "extendedProperties" in call_json
+        assert call_json["extendedProperties"]["private"]["kairos_type"] == "debrief"
+
+    @patch("src.adapters.google_calendar.httpx.request")
+    @patch("src.adapters.google_calendar.httpx.post")
+    def test_update_event(self, mock_post, mock_request, client):
+        """Should update an existing event."""
+        mock_post.return_value.json.return_value = {
+            "access_token": "test-token",
+            "expires_in": 3600,
+        }
+
+        # First call is GET (to get existing event)
+        # Second call is PUT (to update)
+        mock_request.return_value.json.return_value = {
+            "id": "event-id",
+            "summary": "Original",
+            "start": {"dateTime": "2025-01-15T17:30:00Z"},
+            "end": {"dateTime": "2025-01-15T17:45:00Z"},
+        }
+
+        new_start = datetime(2025, 1, 15, 18, 0, tzinfo=UTC)
+        new_end = datetime(2025, 1, 15, 18, 15, tzinfo=UTC)
+
+        client.update_event(
+            event_id="event-id",
+            summary="Updated Event",
+            start_time=new_start,
+            end_time=new_end,
+        )
+
+        # Should have called twice: GET then PUT
+        assert mock_request.call_count == 2
+        put_call = mock_request.call_args_list[1]
+        assert put_call[0][0] == "PUT"
+
+    @patch("src.adapters.google_calendar.httpx.delete")
+    @patch("src.adapters.google_calendar.httpx.post")
+    def test_delete_event_success(self, mock_post, mock_delete, client):
+        """Should delete an event and return True."""
+        mock_post.return_value.json.return_value = {
+            "access_token": "test-token",
+            "expires_in": 3600,
+        }
+        mock_delete.return_value.status_code = 204
+
+        result = client.delete_event("event-id")
+
+        assert result is True
+        mock_delete.assert_called_once()
+
+    @patch("src.adapters.google_calendar.httpx.delete")
+    @patch("src.adapters.google_calendar.httpx.post")
+    def test_delete_event_not_found(self, mock_post, mock_delete, client):
+        """Should return True when event already deleted (404)."""
+        mock_post.return_value.json.return_value = {
+            "access_token": "test-token",
+            "expires_in": 3600,
+        }
+        mock_delete.return_value.status_code = 404
+
+        result = client.delete_event("event-id")
+
+        assert result is True

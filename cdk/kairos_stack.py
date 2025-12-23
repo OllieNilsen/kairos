@@ -13,6 +13,7 @@ from aws_cdk import (
     aws_iam as iam,
     aws_lambda as lambda_,
     aws_logs as logs,
+    aws_scheduler as scheduler,
     aws_sns as sns,
     aws_ssm as ssm,
 )
@@ -301,6 +302,173 @@ class KairosStack(Stack):
             removal_policy=RemovalPolicy.DESTROY,  # For dev - change for prod
             time_to_live_attribute="ttl",  # Auto-cleanup old entries
         )
+
+        # ========================================
+        # SLICE 2 MVP: Daily Planning & Scheduling
+        # ========================================
+
+        # === Prompt Sender Lambda (initiates daily debrief calls) ===
+        # We need to create this first to get its ARN for the scheduler
+        prompt_sender_fn = lambda_.Function(
+            self,
+            "PromptSenderFunction",
+            function_name="kairos-prompt-sender",
+            code=lambda_.Code.from_asset(src_path),
+            handler="handlers.prompt_sender.handler",
+            environment={
+                "USER_STATE_TABLE": user_state_table.table_name,
+                "IDEMPOTENCY_TABLE": idempotency_table.table_name,
+                "MEETINGS_TABLE": meetings_table.table_name,
+                "SSM_BLAND_API_KEY": SSM_BLAND_API_KEY,
+                "WEBHOOK_URL": webhook_url.url,
+                "POWERTOOLS_SERVICE_NAME": "kairos-prompt-sender",
+            },
+            timeout=Duration.seconds(60),  # Longer timeout for API calls
+            **{k: v for k, v in common_lambda_props.items() if k != "timeout"},
+        )
+
+        # Grant DynamoDB access
+        user_state_table.grant_read_write_data(prompt_sender_fn)
+        idempotency_table.grant_read_write_data(prompt_sender_fn)
+        meetings_table.grant_read_data(prompt_sender_fn)
+
+        # Grant SSM read access for Bland API key and user phone
+        prompt_sender_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["ssm:GetParameter"],
+                resources=[
+                    f"arn:aws:ssm:{self.region}:{self.account}:parameter/kairos/*",
+                ],
+            )
+        )
+
+        # === IAM Role for EventBridge Scheduler ===
+        scheduler_role = iam.Role(
+            self,
+            "SchedulerRole",
+            role_name="kairos-scheduler-role",
+            assumed_by=iam.ServicePrincipal("scheduler.amazonaws.com"),
+            description="Role for EventBridge Scheduler to invoke Kairos Lambdas",
+        )
+
+        # Grant permission to invoke prompt sender Lambda
+        prompt_sender_fn.grant_invoke(scheduler_role)
+
+        # === Daily Planning Lambda ===
+        daily_plan_fn = lambda_.Function(
+            self,
+            "DailyPlanFunction",
+            function_name="kairos-daily-plan",
+            code=lambda_.Code.from_asset(src_path),
+            handler="handlers.daily_plan_prompt.handler",
+            environment={
+                "USER_STATE_TABLE": user_state_table.table_name,
+                "IDEMPOTENCY_TABLE": idempotency_table.table_name,
+                "PROMPT_SENDER_ARN": prompt_sender_fn.function_arn,
+                "SCHEDULER_ROLE_ARN": scheduler_role.role_arn,
+                "MVP_USER_ID": "user-001",  # MVP: single user
+                "POWERTOOLS_SERVICE_NAME": "kairos-daily-plan",
+            },
+            timeout=Duration.seconds(60),  # Longer timeout for calendar API calls
+            **{k: v for k, v in common_lambda_props.items() if k != "timeout"},
+        )
+
+        # Grant DynamoDB access
+        user_state_table.grant_read_write_data(daily_plan_fn)
+        idempotency_table.grant_read_write_data(daily_plan_fn)
+
+        # Grant SSM read access for Google OAuth credentials
+        daily_plan_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["ssm:GetParameter"],
+                resources=[
+                    f"arn:aws:ssm:{self.region}:{self.account}:parameter{SSM_GOOGLE_CLIENT_ID}",
+                    f"arn:aws:ssm:{self.region}:{self.account}:parameter{SSM_GOOGLE_CLIENT_SECRET}",
+                    f"arn:aws:ssm:{self.region}:{self.account}:parameter{SSM_GOOGLE_REFRESH_TOKEN}",
+                ],
+            )
+        )
+
+        # Grant EventBridge Scheduler permissions
+        daily_plan_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "scheduler:CreateSchedule",
+                    "scheduler:UpdateSchedule",
+                    "scheduler:DeleteSchedule",
+                    "scheduler:GetSchedule",
+                ],
+                resources=[
+                    f"arn:aws:scheduler:{self.region}:{self.account}:schedule/default/kairos-*",
+                ],
+            )
+        )
+
+        # Grant permission to pass the scheduler role
+        daily_plan_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["iam:PassRole"],
+                resources=[scheduler_role.role_arn],
+            )
+        )
+
+        # Also grant scheduler permissions to calendar webhook (for reconciliation)
+        calendar_webhook_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "scheduler:CreateSchedule",
+                    "scheduler:UpdateSchedule",
+                    "scheduler:DeleteSchedule",
+                    "scheduler:GetSchedule",
+                ],
+                resources=[
+                    f"arn:aws:scheduler:{self.region}:{self.account}:schedule/default/kairos-*",
+                ],
+            )
+        )
+        calendar_webhook_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["iam:PassRole"],
+                resources=[scheduler_role.role_arn],
+            )
+        )
+
+        # === EventBridge Scheduler: Daily 08:00 Europe/London ===
+        # Using L1 construct since L2 for Scheduler is not yet available
+        daily_schedule = scheduler.CfnSchedule(
+            self,
+            "DailyPlanSchedule",
+            name="kairos-daily-plan",
+            schedule_expression="cron(0 8 * * ? *)",  # 08:00 every day
+            schedule_expression_timezone="Europe/London",
+            flexible_time_window=scheduler.CfnSchedule.FlexibleTimeWindowProperty(
+                mode="OFF",
+            ),
+            target=scheduler.CfnSchedule.TargetProperty(
+                arn=daily_plan_fn.function_arn,
+                role_arn=scheduler_role.role_arn,
+                input='{"source": "scheduled"}',
+            ),
+            state="ENABLED",
+            description="Daily planning at 08:00 Europe/London",
+        )
+
+        # Grant scheduler permission to invoke daily plan Lambda
+        daily_plan_fn.grant_invoke(scheduler_role)
+
+        # === CloudWatch Alarm for Daily Plan Errors ===
+        daily_plan_errors = daily_plan_fn.metric_errors(period=Duration.minutes(5))
+        daily_plan_alarm = cloudwatch.Alarm(
+            self,
+            "DailyPlanErrorAlarm",
+            metric=daily_plan_errors,
+            threshold=1,
+            evaluation_periods=1,
+            alarm_description="Kairos daily plan Lambda errors",
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+        daily_plan_alarm.add_alarm_action(cw_actions.SnsAction(alarm_topic))
 
         # === Outputs ===
         cdk.CfnOutput(
