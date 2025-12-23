@@ -44,8 +44,7 @@ class UserState(BaseModel):
     snooze_until: str | None = None  # ISO8601 - don't prompt/call until this time
     stopped: bool = False  # User opted out (STOP) - never prompt/call
 
-    # Google OAuth (from Phase 2A)
-    google_refresh_token: str | None = None
+    # Google Calendar push subscription (refresh token is in SSM, not here)
     google_channel_id: str | None = None
     google_channel_expiry: str | None = None
 

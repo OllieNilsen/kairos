@@ -1,3 +1,6 @@
+Updated `PLAN.md` (Slice 1 preserved from your current file; Slice 2 rewritten to match the fixed-time, ask-first SMS MVP with scheduler reconciliation + idempotency/fencing, and Europe/London timezone). Slice 1 content is taken from your uploaded plan .
+
+```markdown
 # Kairos Slice 1: Mock Event Debrief
 
 ## Architecture Overview
@@ -216,131 +219,206 @@ make clean
 
 ---
 
-# Slice 2: Fixed-Time SMS Prompt Debriefs (MVP)
+# Slice 2: Fixed-Time SMS Prompt Debriefs (MVP, Single User)
 
 ## Overview
 
-A simpler, predictable, low-annoyance approach to calendar-driven debriefs. Instead of complex gap detection with Step Functions, we use a fixed daily prompt time with event-driven SMS handling.
+A predictable, low-annoyance approach to calendar-driven debriefs. We intentionally avoid Step Functions and gap-detection polling. The system prompts **once per day at a fixed time** (user-configurable later), waits for an SMS reply (event-driven), and initiates **at most one debrief call per day**.
 
 ### MVP Policy (Single User)
 
 - **One debrief call per day maximum**
 - **Ask-first via SMS** at a fixed scheduled time (configurable), NOT gap detection
-- **No reminders/nagging by default** - if user ignores SMS, do nothing until next day
-- **If user replies NO** - snooze until tomorrow (unless they text READY later)
+- **No reminders/nagging by default**: if the user ignores the prompt, do nothing until tomorrow
+- **If the user replies NO**: snooze until tomorrow (but they can text READY later)
 - **Inbound SMS can arrive anytime** (minutes/hours later) and must still work
+- **Timezone for MVP**: `Europe/London` (DST-aware)
 
-### User Experience Flow
+---
+
+## User Experience Flow (Canonical)
 
 ```
-[8:00 AM] Daily planner runs
-    → Calculates today's prompt time (e.g., 5:30 PM)
-    → Creates/updates "Kairos Debrief" event in user's Google Calendar
-    → Resets daily counters
-    
-[User sees calendar event]
-    → Can move it to a different time (event has guestsCanModify: true)
-    → Can delete it to skip today's debrief
-    → Calendar webhook detects change → system reschedules prompt
-    
-[5:30 PM] Prompt sender checks
-    → Reads debrief event time from calendar (in case user moved it)
-    → "You had 3 meetings (Q4 Planning, 1:1 Sarah, Standup). Debrief call? Reply YES or NO"
-    
+[08:00 Europe/London] Daily planner runs
+  → Ensures today's "📞 Kairos Debrief" event exists in Google Calendar at preferred time (default 17:30)
+  → Resets daily counters
+  → Schedules a one-time prompt trigger at the event time (EventBridge Scheduler)
+
+[User sees the event]
+  → Can move it to change the prompt time
+  → Can delete it to skip today
+  → Calendar webhook detects move/delete and reconciles the one-time schedule
+
+[Prompt time] Prompt Sender runs
+  → Double-checks the debrief event (belt & suspenders)
+  → If unchanged + pending meetings exist: sends exactly one SMS prompt
+
 [User replies anytime]
-    → "yes" / "ok" / "ready" → Call initiates immediately
-    → "no" / "skip" / "busy" → "OK, I'll check in tomorrow. Text READY if you change your mind."
-    → "stop" → Opt out of all future prompts
-    → [hours later] "ready" → Call still initiates (if no call made yet today)
-    
+  YES/READY → initiate the daily debrief call immediately (idempotent)
+  NO        → snooze until tomorrow (no reminders)
+  STOP      → opt out of all future prompts
+
 [Call completes]
-    → AI reviews each meeting sequentially
-    → Summary SMS sent via Twilio
-    → Meetings marked as debriefed
-    → Debrief calendar event marked as completed/deleted
+  → Existing Bland webhook pipeline summarizes
+  → Meetings marked debriefed
+  → Summary sent via SMS (Twilio) (optionally also email later)
+  → Debrief calendar event deleted or marked completed
 ```
 
-### Key Design Decisions
+---
+
+## Key Design Decisions
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Calendar sync | **Google Push (Webhooks)** | Real-time meeting updates (reuse from Phase 2A) |
-| Debrief scheduling | **Calendar event (`guestsCanModify`)** | User can directly move event; webhook detects & reschedules |
-| Orchestration | **EventBridge Scheduler** | One-time triggers at exact time; no polling |
-| SMS (prompt + summary) | **Twilio** | Single channel for all notifications; immediate delivery |
-| State management | **DynamoDB** | User state + idempotency in one place |
-| Execution model | **Event-driven** | SMS webhook triggers call, no polling loops |
-| Idempotency | **Conditional writes** | Prevent duplicate prompts/calls even with retries |
+| Calendar sync | Google Push (Webhooks) | Real-time meeting updates |
+| Debrief scheduling UX | A calendar event the user can move/delete | Founders already “live” in calendar; predictable |
+| Orchestration | EventBridge Scheduler (recurring + one-time) | Exact timing, no polling loops |
+| SMS | Twilio | 2-way SMS (inbound replies) |
+| State | DynamoDB | Durable state + idempotency |
+| Idempotency | Conditional writes | Prevent duplicate prompts/calls under retries |
 
-## Architecture
+---
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         SLICE 2 MVP ARCHITECTURE                            │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│                        ┌─────────────────────────────────────────┐          │
-│                        │            Google Calendar              │          │
-│                        │  (meetings + debrief scheduling event)  │          │
-│                        └────┬──────────────▲──────────────▲──────┘          │
-│                             │push          │create        │read             │
-│                             │              │event         │event            │
-│                             ▼              │              │                 │
-│                    ┌─────────────────┐     │              │                 │
-│                    │ Calendar Webhook│     │              │                 │
-│                    │ Lambda          │     │              │                 │
-│                    └────────┬────────┘     │              │                 │
-│                             │              │              │                 │
-│  ┌──────────────┐           │         ┌────┴────────┐     │                 │
-│  │ EventBridge  │──────────────────►  │ Daily Plan  │     │                 │
-│  │ (8am daily)  │           │         │ Lambda      │     │                 │
-│  └──────────────┘           │         └──────┬──────┘     │                 │
-│                             │                │            │                 │
-│                             ▼                ▼            │                 │
-│                    ┌─────────────────────────────────┐    │                 │
-│                    │          DynamoDB               │    │                 │
-│                    │  (meetings + user-state)        │    │                 │
-│                    └────────────────┬────────────────┘    │                 │
-│                                     │                     │                 │
-│                                     │                     │                 │
-│  EventBridge Scheduler              │                     │                 │
-│  (one-time at prompt time)          │                     │                 │
-│         │                           │                     │                 │
-│         ▼                           ▼                     │                 │
-│  ┌─────────────────┐─────────────────────────────────────►┘                 │
-│  │ Prompt Sender   │                                                        │
-│  │ Lambda          │────►  Twilio (outbound SMS)                            │
-│  └─────────────────┘                                                        │
-│                                                                             │
-│  Twilio ──────────►┌─────────────────┐────►┌─────────────────┐              │
-│  (inbound SMS)     │ SMS Webhook     │     │ Initiate Call   │              │
-│                    │ Lambda          │     │ Lambda          │              │
-│                    └─────────────────┘     └────────┬────────┘              │
-│                                                     │                       │
-│                                                     ▼                       │
-│                                            ┌─────────────────┐              │
-│                                            │ Bland AI        │              │
-│                                            │ (voice call)    │              │
-│                                            └────────┬────────┘              │
-│                                                     │                       │
-│                                                     ▼                       │
-│                                            ┌─────────────────┐              │
-│                                            │ Webhook Lambda  │──► Twilio    │
-│                                            │ (existing)      │   (SMS)      │
-│                                            └─────────────────┘              │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
+## Architecture (MVP, no Step Functions)
+
+```mermaid
+flowchart LR
+  GC[Google Calendar] -->|push watch| CALWH[calendar_webhook Lambda]
+  CALWH --> MEET[(DynamoDB kairos-meetings)]
+  CALWH --> USTATE[(DynamoDB kairos-user-state)]
+  CALWH -->|move/delete debrief event| SCHED[EventBridge Scheduler]
+
+  PLANSCHED[Scheduler: daily 08:00 Europe/London] --> PLAN[daily_plan_prompt Lambda]
+  PLAN --> GC
+  PLAN --> USTATE
+  PLAN -->|reconcile| SCHED
+
+  SCHED -->|one-time at prompt time| PROMPT[prompt_sender Lambda]
+  PROMPT --> GC
+  PROMPT --> MEET
+  PROMPT --> USTATE
+  PROMPT --> TWOUT[Twilio outbound SMS]
+
+  TWIN[Twilio inbound SMS] --> SMSWH[sms_webhook Lambda]
+  SMSWH --> USTATE
+  SMSWH -->|YES/READY| CALL[initiate_daily_call Lambda]
+  CALL --> MEET
+  CALL --> BLAND[Bland AI call]
+
+  BLAND -->|call_ended webhook| WEBHOOK[webhook Lambda (existing)]
+  WEBHOOK --> MEET
+  WEBHOOK --> USTATE
+  WEBHOOK --> TWOUT
 ```
 
-**Key Calendar Interactions:**
-- **Daily Plan Lambda** → Creates "📞 Kairos Debrief" event at preferred prompt time (with `guestsCanModify: true`)
-- **Calendar Webhook** → Detects if user moves/deletes the debrief event → reschedules EventBridge
-- **Prompt Sender Lambda** → Double-checks event time before sending (belt & suspenders)
-- **Post-call** → Deletes or marks event as completed
+---
+
+## Scheduling (Europe/London, DST-safe)
+
+### Recurring schedule
+Use **EventBridge Scheduler** for a recurring trigger:
+- `daily_plan_prompt` runs at **08:00 Europe/London** (not UTC).
+
+### One-time prompt schedule
+For each day, create exactly one schedule that fires at `next_prompt_at`:
+- schedule name is deterministic: `kairos-prompt-{user_id}-{YYYY-MM-DD}`.
+- created/updated by `daily_plan_prompt` and by `calendar_webhook` (if user moves the event).
+
+---
+
+## Budget & Safety Rules (hard rules)
+
+These rules are enforced before sending SMS or initiating calls:
+
+1. If `stopped == true` → **never prompt/call**
+2. If `prompts_sent_today >= 1` → **never prompt again today**
+3. If `daily_call_made == true` → **never call again today**
+4. If `snooze_until > now` → **do not prompt/call**
+5. **No reminders by default** (single prompt/day, no follow-ups)
+
+---
+
+## Idempotency / Dedup / Fencing
+
+Retries can happen from Scheduler, Twilio, Google webhooks, and Lambda itself. Treat every side-effect as idempotent.
+
+### DynamoDB: `kairos-idempotency`
+Single table with PK `idempotency_key` and TTL.
+
+**Key formats (canonical)**
+- Outbound prompt SMS: `sms-send:{user_id}#{YYYY-MM-DD}`
+- Inbound SMS: `sms-in:{TwilioMessageSid}`
+- Daily call: `call-batch:{user_id}#{YYYY-MM-DD}`
+- Daily planner lease: `daily-plan:{user_id}#{YYYY-MM-DD}`
+- (Optional) Schedule reconciliation fence: `schedule:{user_id}#{YYYY-MM-DD}`
+
+**Conditional write rules**
+- Prompt sender must acquire `sms-send:*` **before** sending any SMS.
+- SMS webhook must acquire `sms-in:*` **before** parsing/acting.
+- Call initiator must acquire `call-batch:*` **before** creating a Bland call.
+- Daily planner must acquire `daily-plan:*` to avoid duplicate runs.
+
+### Existing webhook dedup
+Keep the existing Bland webhook `call_id` dedup table/pattern from Slice 1.
+
+---
+
+## Schedule Reconciliation (canonical spec)
+
+We must ensure: **moving/deleting the debrief event never causes extra prompts** and never leaves orphan schedules behind.
+
+### Deterministic schedule naming
+- `prompt_schedule_name = kairos-prompt-{user_id}-{YYYY-MM-DD}`
+
+### Reconciliation function (shared)
+Implemented in a shared module (e.g., `src/adapters/scheduler.py`) and used by:
+- `daily_plan_prompt`
+- `calendar_webhook`
+- (optionally) `prompt_sender` for belt-and-suspenders
+
+**Inputs**
+- `schedule_name`
+- `target_time_utc_iso` (derived from Europe/London local time)
+- `target_lambda_arn`
+- `payload` (e.g., `{user_id, date}`)
+
+**Algorithm**
+1. (Optional) acquire `schedule:{user_id}#{YYYY-MM-DD}` idempotency key; if already acquired, no-op.
+2. If `target_time` is in the past: best-effort delete schedule; clear `next_prompt_at`; exit.
+3. Attempt `UpdateSchedule(schedule_name, at(target_time_utc_iso), target=...)`.
+4. If schedule does not exist: `CreateSchedule` with that name.
+5. Ensure schedule auto-deletes after execution if supported/desired.
+
+### Calendar move/delete behavior
+- If user **moves** event: recompute `next_prompt_at`, update `kairos-user-state`, then reconcile schedule to the new time.
+- If user **deletes** event: clear `next_prompt_at` and debrief event IDs; delete schedule; do not prompt today.
+
+---
+
+## Calendar Debrief Event (robust identification)
+
+Keep storing `debrief_event_id` and `debrief_event_etag`, but also tag the event so it can be rediscovered reliably:
+
+- `extendedProperties.private.kairos_type = "debrief"`
+- `extendedProperties.private.kairos_user_id = "{user_id}"`
+- `extendedProperties.private.kairos_date = "YYYY-MM-DD"`
+
+**Event defaults**
+- Title: `📞 Kairos Debrief`
+- Duration: 15 minutes
+- Description: short instructions (how to reply; that moving changes prompt time)
+- User can move or delete.
+
+Post-call, choose one:
+- **Option A (recommended):** delete the event (clean calendar)
+- **Option B:** update title to `✅ Kairos Debrief (completed)`
+
+---
 
 ## Data Model
 
-### DynamoDB: `kairos-meetings` Table (existing)
+### DynamoDB: `kairos-meetings` (existing)
 
 | Attribute | Type | Description |
 |-----------|------|-------------|
@@ -355,101 +433,90 @@ A simpler, predictable, low-annoyance approach to calendar-driven debriefs. Inst
 | `created_at` | ISO8601 | When synced |
 | `ttl` | Number | Auto-cleanup after 30 days |
 
-**GSI (future-proof):**
-- GSI1PK = `user_id`
-- GSI1SK = `start_time` (or `start_time#meeting_id`)
+**GSI (recommended, low-effort, future-proof)**
+- `GSI1PK = user_id`
+- `GSI1SK = start_time` (or `start_time#meeting_id`)
 
-### DynamoDB: `kairos-user-state` Table
+### DynamoDB: `kairos-user-state`
+
+For MVP single-user, store the **Google refresh token in SSM**, not DynamoDB (avoid duplicating sources of truth).
 
 | Attribute | Type | Description |
 |-----------|------|-------------|
 | `user_id` | PK | User identifier |
-| **Contact Info** | | |
-| `phone_number` | String | For SMS prompts + summaries (E.164) |
-| `email` | String | Optional, for future use |
-| `timezone` | String | e.g., "Europe/London" |
-| **Scheduling** | | |
-| `preferred_prompt_time` | String | "17:30" (HH:MM format) |
-| `next_prompt_at` | ISO8601 | When to send today's prompt |
-| `prompt_schedule_name` | String | EventBridge Scheduler schedule name |
-| `debrief_event_id` | String | Google Calendar event ID for today's debrief |
-| `debrief_event_etag` | String | For detecting user modifications |
-| **Daily State** (reset each morning) | | |
-| `prompts_sent_today` | Number | Counter (max 1) |
-| `last_prompt_at` | ISO8601 | When last prompt was sent |
-| `awaiting_reply` | Boolean | True after prompt sent |
-| `active_prompt_id` | String | Current prompt identifier |
-| `daily_call_made` | Boolean | True after call initiated |
-| `last_call_at` | ISO8601 | When last call was made |
+| `phone_number` | String | E.164 |
+| `email` | String | Optional (future) |
+| `timezone` | String | `"Europe/London"` |
+| `preferred_prompt_time` | String | `"17:30"` (HH:MM) |
+| `next_prompt_at` | ISO8601 | Next prompt timestamp (UTC or ISO with Z) |
+| `prompt_schedule_name` | String | `kairos-prompt-{user_id}-{YYYY-MM-DD}` |
+| `debrief_event_id` | String | Google event ID |
+| `debrief_event_etag` | String | Google etag |
+| `prompts_sent_today` | Number | Max 1 |
+| `last_prompt_at` | ISO8601 | Last prompt sent |
+| `awaiting_reply` | Boolean | True after prompt |
+| `active_prompt_id` | String | e.g., `user_id#YYYY-MM-DD` |
+| `daily_call_made` | Boolean | True after initiating call |
+| `last_call_at` | ISO8601 | When call initiated |
 | `daily_batch_id` | String | `user_id#YYYY-MM-DD` |
-| `last_daily_reset` | ISO8601 | When counters were reset |
-| **Control State** | | |
-| `snooze_until` | ISO8601 | Don't prompt/call until this time |
-| `stopped` | Boolean | User opted out (STOP) |
-| **Google OAuth** (existing) | | |
-| `google_refresh_token` | String (encrypted) | OAuth refresh token |
-| `google_channel_id` | String | Calendar push subscription ID |
-| `google_channel_expiry` | ISO8601 | When to renew subscription |
+| `last_daily_reset` | ISO8601 | Daily reset timestamp |
+| `snooze_until` | ISO8601 | Snooze |
+| `stopped` | Boolean | STOP opt-out |
+| `google_channel_id` | String | Push subscription ID |
+| `google_channel_expiry` | ISO8601 | Renewal time |
 
-### DynamoDB: `kairos-idempotency` Table
+### DynamoDB: `kairos-idempotency`
 
 | Attribute | Type | Description |
 |-----------|------|-------------|
 | `idempotency_key` | PK | Unique operation key |
 | `created_at` | ISO8601 | When acquired |
-| `metadata` | Map | Optional context |
-| `ttl` | Number | Auto-cleanup (7 days) |
+| `metadata` | Map | Optional |
+| `ttl` | Number | Auto-cleanup (e.g., 7 days) |
 
-**Key Formats:**
-- SMS send dedup: `sms-send:{user_id}#{YYYY-MM-DD}`
-- Inbound SMS dedup: `sms-in:{MessageSid}`
-- Call batch dedup: `call-batch:{user_id}#{YYYY-MM-DD}`
-- Daily lease: `daily-plan:{user_id}#{YYYY-MM-DD}`
+---
 
-## Budget & Safety Rules
-
-### Hard Rules (enforced in code)
-
-1. **If `stopped = true`** → Never prompt or call
-2. **If `prompts_sent_today >= 1`** → Never prompt again today
-3. **If `daily_call_made = true`** → Never call again today
-4. **If `snooze_until` is in the future** → Don't prompt or call
-5. **No reminders by default** → Single prompt per day, no follow-ups
-
-### Intent Parsing
+## Intent Parsing (SMS)
 
 | User Says | Intent | Action |
 |-----------|--------|--------|
 | yes, yeah, yep, ok, okay, sure, call, go | `YES` | Initiate call |
 | ready, i'm ready, now | `READY` | Clear snooze, initiate call |
 | no, nope, nah, later, skip, busy | `NO` | Snooze until tomorrow |
-| stop, unsubscribe, quit, cancel | `STOP` | Set `stopped = true`, never contact again |
-| (anything else) | `UNKNOWN` | Reply with help message |
+| stop, unsubscribe, quit, cancel | `STOP` | Set `stopped = true`, confirm opt-out |
+| anything else | `UNKNOWN` | Reply with brief help message |
 
-## New Project Structure (Additions)
+---
+
+## Project Structure (Slice 2 additions)
+
+Remove Step Functions components; add Scheduler + Twilio + state repos.
 
 ```
 kairos/
 ├── src/
 │   ├── adapters/
 │   │   ├── ... (existing)
-│   │   ├── google_calendar.py    # OAuth + Calendar API (existing)
-│   │   ├── twilio_sms.py         # Send SMS + validate webhook signature
-│   │   ├── user_state.py         # DynamoDB user state repository
-│   │   └── idempotency.py        # Dedup helpers (SMS, calls, leases)
+│   │   ├── google_calendar.py     # OAuth + Calendar API
+│   │   ├── twilio_sms.py          # Send SMS + validate webhook signature
+│   │   ├── scheduler.py           # EventBridge Scheduler: create/update/delete
+│   │   ├── user_state.py          # DynamoDB user state repository
+│   │   └── idempotency.py         # Conditional-write helpers
 │   ├── core/
-│   │   ├── models.py             # Add UserState, TwilioInboundSMS models
-│   │   └── prompts.py            # Add multi-meeting debrief prompt
-│   ├── handlers/
-│   │   ├── ... (existing)
-│   │   ├── calendar_webhook.py   # Google push notifications (existing)
-│   │   ├── daily_plan_prompt.py  # 8am daily planner
-│   │   ├── prompt_sender.py      # Check time & send SMS prompt
-│   │   ├── sms_webhook.py        # Twilio inbound SMS handler
-│   │   └── initiate_daily_call.py # Start Bland call with all pending meetings
+│   │   ├── models.py              # Add UserState, TwilioInboundSMS models
+│   │   └── prompts.py             # Add multi-meeting prompt builders
+│   └── handlers/
+│       ├── ... (existing)
+│       ├── calendar_webhook.py    # Google push notifications
+│       ├── daily_plan_prompt.py   # Daily planner at 08:00 Europe/London
+│       ├── prompt_sender.py       # One-time scheduled prompt sender
+│       ├── sms_webhook.py         # Twilio inbound SMS handler
+│       └── initiate_daily_call.py # Start Bland call with all pending meetings
 ├── cdk/
-│   └── kairos_stack.py           # Add new tables, Lambdas, schedules
+│   └── kairos_stack.py            # Extend stack: tables, lambdas, schedules
 ```
+
+---
 
 ## Implementation Phases
 
@@ -464,98 +531,85 @@ kairos/
 - [x] Store refresh token in SSM (encrypted)
 - [x] Add CDK resources (Lambda, DynamoDB, Function URL)
 
-### Phase 2A.1: Debrief Event Change Detection (extends calendar webhook)
-- [ ] Enhance `calendar_webhook.py` to detect changes to the debrief event:
-  - Check if changed event ID matches `debrief_event_id` in user state
-  - **If event moved** → update `next_prompt_at` and reschedule EventBridge
-  - **If event deleted** → clear `debrief_event_id`, delete EventBridge schedule
-  - **If event time is in the past** → skip (too late to reschedule)
-- [ ] Grant calendar webhook permission to modify EventBridge Scheduler
-- [ ] This enables real-time response to user calendar changes
+### Phase 2A.1: Debrief Event Change Detection (extend calendar webhook)
+- [ ] In `calendar_webhook.py`, detect changes to today’s debrief event:
+  - Identify via `debrief_event_id` OR via `extendedProperties.private.kairos_type="debrief"`
+  - If moved → update `next_prompt_at` and reconcile the one-time Scheduler schedule
+  - If deleted → clear debrief fields, delete schedule, skip today
+- [ ] Grant calendar webhook permission to create/update/delete Scheduler schedules
 
 ### Phase 2B: User State & Idempotency Tables
 - [ ] Create `kairos-user-state` DynamoDB table
 - [ ] Create `kairos-idempotency` DynamoDB table
-- [ ] Implement `user_state.py` adapter (read/update with conditionals)
-- [ ] Implement `idempotency.py` adapter (SMS dedup, call dedup, leases)
+- [ ] Implement `user_state.py` (read/update; minimal helper methods)
+- [ ] Implement `idempotency.py` (conditional put w/ TTL)
 - [ ] Add `UserState` model to `models.py`
 - [ ] Add CDK resources for new tables
 
-### Phase 2C: Daily Planning Lambda
-- [ ] Implement `daily_plan_prompt.py` handler
-  - Reset daily counters (`prompts_sent_today`, `daily_call_made`)
-  - Calculate `next_prompt_at` from user timezone + preferred time
-  - **Create/update "Kairos Debrief" event in user's Google Calendar**
-    - Title: "📞 Kairos Debrief" (or configurable)
-    - Time: `next_prompt_at` (15-minute duration)
-    - Description: "Reply YES to the SMS to start your debrief call. Move this event to change the prompt time."
-    - **Set `guestsCanModify: true`** so user can directly move/edit the event
-    - Store `debrief_event_id` and `debrief_event_etag` in user state
-  - **Create EventBridge Scheduler one-time schedule** for `next_prompt_at`
-    - Target: Prompt Sender Lambda
-    - Name: `kairos-prompt-{user_id}-{date}` (for idempotency)
-    - Auto-delete after execution
-  - Delete any stale schedules from previous days
-  - Acquire daily lease to prevent duplicate runs
-- [ ] Add EventBridge rule (8am UTC daily)
-- [ ] Grant Lambda permission to create/delete EventBridge Scheduler schedules
-- [ ] Add CDK resources
+### Phase 2C: Scheduler Adapter + Daily Planning Lambda (08:00 Europe/London)
+- [ ] Implement `scheduler.py` adapter:
+  - `upsert_one_time_schedule(name, at_time_utc_iso, target_arn, payload)`
+  - `delete_schedule(name)` (best-effort)
+- [ ] Implement `daily_plan_prompt.py`:
+  - Acquire `daily-plan:{user_id}#{YYYY-MM-DD}`
+  - Reset counters (`prompts_sent_today`, `daily_call_made`, etc.)
+  - Compute today’s debrief time from `preferred_prompt_time` in `Europe/London`
+  - Create/update the Google Calendar debrief event; store `debrief_event_id/etag`
+  - Reconcile one-time schedule to fire at event time
+  - Clean up stale schedule names from prior days (best-effort)
+- [ ] Create **EventBridge Scheduler recurring schedule** at `08:00 Europe/London` targeting `daily_plan_prompt`
 
-### Phase 2D: Prompt Sender Lambda
-- [ ] Implement `prompt_sender.py` handler
-  - **Invoked by EventBridge Scheduler at exact prompt time** (no polling)
-  - **Read debrief event from Google Calendar** (user may have moved it)
-    - If event deleted → skip today's prompt, delete the schedule
-    - If event moved → reschedule (create new schedule at new time)
-    - If event unchanged → proceed normally
-  - Check idempotency (SMS not already sent today)
-  - Get pending meetings from `kairos-meetings`
-  - If no pending meetings → skip prompt, optionally delete calendar event
-  - Send SMS via Twilio
-  - Update user state (`prompts_sent_today`, `awaiting_reply`)
-- [ ] Implement `twilio_sms.py` adapter (send SMS)
-- [ ] Store Twilio credentials in SSM
-- [ ] Add CDK resources (Lambda only - no recurring schedule needed)
+### Phase 2D: Prompt Sender Lambda (one-time schedule, no polling)
+- [ ] Implement `prompt_sender.py`:
+  - Re-read today’s debrief event:
+    - if deleted → delete schedule (best-effort) and exit
+    - if moved → reconcile schedule and exit (do not prompt now)
+  - Acquire idempotency `sms-send:{user_id}#{YYYY-MM-DD}`; if already exists → exit
+  - Load pending meetings for today; if none → exit (optionally delete debrief event)
+  - Send a single SMS prompt via Twilio
+  - Update `kairos-user-state` (`prompts_sent_today=1`, `awaiting_reply=true`, `active_prompt_id=...`)
 
-### Phase 2E: SMS Webhook Handler
-- [ ] Implement `sms_webhook.py` handler
-  - Verify Twilio signature
-  - Deduplicate by MessageSid
+### Phase 2E: Twilio 2-way SMS Webhook
+- [ ] Implement `twilio_sms.py`:
+  - send SMS
+  - verify inbound webhook signature
+- [ ] Implement `sms_webhook.py`:
+  - Verify signature
+  - Acquire `sms-in:{MessageSid}`; if already exists → exit
   - Parse intent (YES/READY/NO/STOP/UNKNOWN)
-  - Update user state accordingly
-  - Trigger call initiation for YES/READY
-- [ ] Implement `twilio_sms.py` webhook verification
-- [ ] Add Lambda Function URL for Twilio webhook
-- [ ] Configure Twilio webhook URL
-- [ ] Add CDK resources
+  - Update state
+  - On YES/READY: invoke `initiate_daily_call` (direct call or async invoke)
+- [ ] Add Lambda Function URL (or API Gateway) endpoint for Twilio inbound webhook
+- [ ] Configure Twilio messaging webhook URL
 
-### Phase 2F: Call Initiation Lambda
-- [ ] Implement `initiate_daily_call.py` handler
-  - Check call idempotency (`call-batch:{user_id}#{date}`)
-  - Get all pending meetings
-  - Build multi-meeting prompt
-  - Call Bland AI
-  - Record `daily_call_made = true`
-- [ ] Add `build_multi_meeting_debrief_prompt()` to `prompts.py`
-- [ ] Add CDK resources
+### Phase 2F: Call Initiation Lambda (one-call/day batching)
+- [ ] Implement `initiate_daily_call.py`:
+  - Acquire `call-batch:{user_id}#{YYYY-MM-DD}`; if exists → exit
+  - Validate: not stopped, not snoozed, no prior call made today
+  - Load all pending meetings for day; build multi-meeting call context
+  - Initiate Bland call
+  - Set `daily_call_made=true`, `last_call_at=now`, `daily_batch_id=...`
 
-### Phase 2G: Post-Call Processing
-- [ ] Update `webhook.py` to:
-  - Mark meetings as debriefed in DynamoDB
-  - **Send summary via Twilio SMS** (instead of SES email)
-  - **Delete or update the debrief calendar event** (mark as completed)
-    - Option A: Delete the event (clean calendar)
-    - Option B: Update title to "✅ Kairos Debrief (completed)"
-- [ ] Add Twilio SSM permissions to webhook Lambda
-- [ ] Update summarization prompt for SMS format (concise)
+### Phase 2G: Post-Call Processing (extend existing webhook)
+- [ ] Update existing `webhook.py` to:
+  - Mark meetings debriefed
+  - Send summary via Twilio SMS (concise format)
+  - Delete or mark the debrief calendar event completed
+  - Keep existing `call_id` webhook dedup logic
 
 ### Phase 2H: Testing & Polish
-- [ ] Unit tests for intent parsing
-- [ ] Unit tests for budget rules (can_prompt, can_call)
-- [ ] Unit tests for idempotency (conditional write behavior)
-- [ ] Integration test: multiple invocations don't double-send/double-call
-- [ ] Add CloudWatch alarms for new Lambdas
-- [ ] Manual end-to-end test
+- [ ] Unit tests:
+  - intent parsing
+  - budget rules
+  - idempotency conditional writes
+  - schedule reconciliation logic
+- [ ] Integration tests:
+  - “scheduler fires twice” → still only one SMS sent
+  - “user replies after hours” → still one call only
+  - “user moves event 3 times” → only one schedule exists and only one prompt max
+- [ ] CloudWatch alarms for new Lambdas
+
+---
 
 ## Configuration (SSM Parameters)
 
@@ -573,23 +627,21 @@ aws ssm put-parameter --name "/kairos/twilio-phone-number" --value "+1xxx" --typ
 # User settings (MVP: single user)
 aws ssm put-parameter --name "/kairos/user-phone-number" --value "+44xxx" --type String
 aws ssm put-parameter --name "/kairos/user-timezone" --value "Europe/London" --type String
+aws ssm put-parameter --name "/kairos/user-preferred-prompt-time" --value "17:30" --type String
 ```
+
+---
 
 ## Cost Estimate (Per Day, ~10 meetings)
 
 | Service | Cost |
 |---------|------|
 | Google Calendar API | Free (within quota) |
-| EventBridge Scheduler | < $0.001 (2 schedules: 8am + prompt time) |
-| Twilio SMS (send) | ~$0.02 (2 messages: prompt + summary) |
-| Twilio SMS (receive) | ~$0.01 (1 reply) |
-| Twilio Phone Number | ~$1/month |
-| DynamoDB | < $0.01 |
-| Lambda | < $0.01 (3-4 invocations, no polling) |
-| Bland AI (1 call, 5 min) | ~$0.45 |
-| **Total** | **~$0.48/day + $1/month Twilio** |
-
-**Savings vs original Slice 2 design:**
-- No Step Functions (~$0.025/day saved)
-- No SES email (simpler stack, single notification channel)
-- No polling (one-time schedules instead of every-5-min Lambda)
+| EventBridge Scheduler | Very low (recurring + one-time) |
+| Twilio SMS (send) | ~2 messages/day (prompt + summary) |
+| Twilio SMS (receive) | ~1 reply/day |
+| DynamoDB | Low |
+| Lambda | Low (no polling loops) |
+| Bland AI (1 call, ~5 min) | Dominant cost driver |
+| **Total** | **Primarily voice minutes + a couple SMS** |
+```
