@@ -11,9 +11,11 @@ if TYPE_CHECKING:
     from core.models import TriggerPayload
 
 # Default voice - can be overridden via environment variable
-# Bland AI voice IDs can be found in their voice library
-# For British female voices, options include: "emma", "charlotte", "ella"
-DEFAULT_VOICE = os.environ.get("BLAND_VOICE_ID", "nat")
+# Rosalie: British female voice - "A young female British speaker"
+# Voice ID from Bland AI voice library
+DEFAULT_VOICE = os.environ.get(
+    "BLAND_VOICE_ID", "a710fd26-0ed7-48e8-86b3-0d4e52d4f500"  # Rosalie - British Female
+)
 
 
 class BlandClient:
