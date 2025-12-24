@@ -6,6 +6,24 @@ Implement a grounded personal knowledge graph with entity extraction, evidence-b
 
 ---
 
+## AI-First Principles
+
+This is an AI-first system. Brittle string matching has no place.
+
+| Operation | ❌ Brittle Approach | ✅ AI-First Approach |
+|-----------|---------------------|----------------------|
+| Quote verification | Substring/token matching | LLM: "Is this quote grounded in this segment?" |
+| Attendee name matching | Jaro-Winkler fuzzy match | LLM: "Does 'Sam' refer to 'Samuel Johnson'?" |
+| Candidate scoring | Weighted feature sum | LLM: Score candidates with reasoning |
+| Role/org hint verification | Substring containment | LLM: "Is this role explicitly stated?" |
+
+**Cost mitigation:**
+- Use Haiku model for verification checks (fast, cheap)
+- Batch extractions per transcript (one call, not per-mention)
+- Only expensive operations (Sonnet) for relationship entailment
+
+---
+
 ## Design Conformity Assessment
 
 This design aligns with the "grounded personal graph + progressive resolution" philosophy. Key conformance points:
@@ -27,12 +45,13 @@ This design aligns with the "grounded personal graph + progressive resolution" p
 | Meeting edges pointed to non-existent nodes | **Meetings are NOT entities** - `meeting_id` is stored as a property on edges/mentions, not as a node type |
 | Tasks/Decisions don't need entity resolution | **Tasks/Decisions are NOT entities** - they're meeting artifacts, stored in summaries, not the knowledge graph |
 | "Ambiguous mention" conflated with "provisional entity" | **Separate mention state from entity state** - mentions have `resolution_state`, entities have `status`. Ambiguous mentions don't create entities. |
-| Email match was weighted, could be overridden | **Fuzzy attendee match = hard link** - if mention fuzzy-matches exactly one attendee (score >= 0.85, clear winner), skip scoring and link via email |
+| Email match was weighted, could be overridden | **LLM attendee match = hard link** - if LLM determines mention clearly refers to exactly one attendee, skip scoring and link via email |
 | "All edges for entity X" was expensive | **Dual-write edges** - EDGEOUT and EDGEIN for bidirectional queries |
 | Evidence arrays could grow unbounded | **Evidence capped** - max 10 evidence items on entities; full evidence lives on mentions/edges or overflow table |
 | Extraction prompt lacked timestamps | **Timestamps required** - extraction must provide `t0`/`t1` or `segment_id` |
-| Candidate retrieval only used name string | **Rich candidate retrieval** - query accepts meeting_id, attendee_emails, local_context, role_hint |
+| Candidate retrieval only used name string | **Broad retrieval, LLM scoring** - cast wide net for candidates, use LLM to score/disambiguate |
 | Alias lookup required scanning all entities | **Inverted alias index** - `kairos-entity-aliases` table enables fast alias → entity lookups |
+| Brittle string matching (Jaro-Winkler, etc.) | **AI-first verification & scoring** - LLM-based matching replaces fuzzy string algorithms |
 
 ---
 
@@ -671,149 +690,147 @@ def resolve_mention(mention, user_id, meeting_attendees: list[AttendeeInfo]):
 ### Attendee Match (Fuzzy)
 
 ```python
-ATTENDEE_MATCH_THRESHOLD = 0.85  # High bar for hard link
-AMBIGUITY_GAP = 0.15  # Best must beat second-best by this margin
-
 def match_mention_to_attendee(
     mention_text: str, 
-    attendees: list[AttendeeInfo]
+    attendees: list[AttendeeInfo],
+    llm: AnthropicClient
 ) -> AttendeeInfo | None:
     """
-    Fuzzy match mention text to attendee display names.
-    Returns the matched attendee ONLY if:
-      1. Best match score >= ATTENDEE_MATCH_THRESHOLD, AND
-      2. Best match is unambiguous (beats second-best by AMBIGUITY_GAP)
+    LLM-based matching of mention text to attendee display names.
+    Returns the matched attendee ONLY if unambiguous.
     
     This is the "hard link" gate - if we return an attendee here,
     we skip scoring entirely and link directly via email.
+    
+    AI-first approach: Use LLM for name matching instead of brittle
+    string similarity (Jaro-Winkler, etc.)
     """
     if not attendees:
         return None
     
-    # Score all attendees
-    scores = []
-    for attendee in attendees:
-        score = fuzzy_match(mention_text, attendee.name)  # Jaro-Winkler or similar
-        scores.append((attendee, score))
-    
-    # Sort by score descending
-    scores.sort(key=lambda x: x[1], reverse=True)
-    best_attendee, best_score = scores[0]
-    
-    # Must meet threshold
-    if best_score < ATTENDEE_MATCH_THRESHOLD:
+    attendee_list = [f"- {a.name} ({a.email})" for a in attendees if a.email]
+    if not attendee_list:
         return None
     
-    # Must be unambiguous (if there's a second candidate)
-    if len(scores) > 1:
-        second_score = scores[1][1]
-        if best_score - second_score < AMBIGUITY_GAP:
-            return None  # Too close to call
+    prompt = f"""Given a mention from a meeting transcript and a list of meeting attendees, determine if the mention clearly refers to exactly one attendee.
+
+Mention: "{mention_text}"
+
+Attendees:
+{chr(10).join(attendee_list)}
+
+Respond with ONLY a JSON object:
+{{
+  "match": "CLEAR" | "AMBIGUOUS" | "NO_MATCH",
+  "matched_email": "<email if CLEAR, null otherwise>",
+  "reasoning": "<one sentence>"
+}}
+
+Rules:
+- CLEAR: The mention obviously refers to exactly one attendee (e.g., "Sam" when only one Sam)
+- AMBIGUOUS: The mention could refer to multiple attendees (e.g., "Sam" when two Sams present)
+- NO_MATCH: The mention doesn't match any attendee
+"""
+    response = llm.complete(prompt, model="claude-3-haiku-20240307")  # Fast/cheap model
+    result = json.loads(response)
     
-    return best_attendee
+    if result["match"] == "CLEAR" and result["matched_email"]:
+        return next((a for a in attendees if a.email == result["matched_email"]), None)
+    return None
 ```
 
 **Examples:**
-- "Sam" with attendees ["Samuel Johnson"] → match (0.91 score, no competition)
-- "Sam" with attendees ["Samuel Johnson", "Sam Williams"] → `None` (both score ~0.9, ambiguous)
-- "Dr. Smith" with attendees ["John Smith", "Jane Doe"] → `None` (0.7 score, below threshold)
-- "Samuel Johnson" with attendees ["Samuel Johnson", "Jane Doe"] → match (1.0 vs 0.3, clear winner)
+- "Sam" with attendees ["Samuel Johnson"] → match (LLM: CLEAR, only one Sam)
+- "Sam" with attendees ["Samuel Johnson", "Sam Williams"] → `None` (LLM: AMBIGUOUS)
+- "the CFO" with attendees ["Jane Smith (CFO)", "Bob Jones"] → match (LLM: CLEAR, role match)
+- "Dr. Smith" with attendees ["John Smith MD", "Jane Doe"] → match (LLM: CLEAR, title match)
 
 ---
 
 ### Scoring Function
 
 ```python
-def score_candidate(mention: Mention, candidate: Entity) -> float:
-    """
-    Score how likely this mention refers to this candidate entity.
-    
-    IMPORTANT: Email matches are handled upstream as hard links (Step 0).
-    This function is only called for non-email resolution.
-    
-    Returns: float 0.0 - 1.0 (capped)
-    
-    Weight distribution (sums to 1.0):
-    - Name/alias similarity:   0.25
-    - Attendee overlap:        0.25
-    - Organization overlap:    0.20
-    - Role/title match:        0.15
-    - Temporal proximity:      0.10
-    - Embedding similarity:    0.05 (later)
-    
-    Field sources:
-    - mention.mention_text: from extraction
-    - mention.meeting_attendee_emails: copied from Meeting.attendees at extraction time
-    - mention.org_hint: extracted from local_context
-    - mention.role_hint: extracted from quote
-    - mention.created_at: when mention was stored
-    - candidate.aliases: from entity record
-    - candidate.recent_meeting_ids: stored on entity (max 10)
-    - get_attendee_emails_for_meetings(): computed on-demand from recent_meeting_ids
-    - candidate.organization: derived from WORKS_AT edge
-    - candidate.role: from most recent role_hint
-    - candidate.last_seen: updated on each linked mention
-    """
-    score = 0.0
-    
-    # Name/alias similarity (Jaro-Winkler or similar)
-    name_sim = fuzzy_match(mention.mention_text, candidate.aliases)
-    score += name_sim * 0.25
-    
-    # Attendee overlap (same people in meeting → likely same context)
-    # Compute on-demand from recent_meeting_ids to avoid unbounded storage
-    candidate_attendee_emails = get_attendee_emails_for_meetings(
-        user_id, 
-        candidate.recent_meeting_ids  # max 10 meetings
-    )
-    attendee_overlap = jaccard(
-        set(mention.meeting_attendee_emails), 
-        set(candidate_attendee_emails)
-    )
-    score += attendee_overlap * 0.25
-    
-    # Organization overlap (same company mentioned)
-    if mention.org_hint and candidate.organization:
-        if fuzzy_match(mention.org_hint, candidate.organization) > 0.8:
-            score += 0.20
-    
-    # Role/title match
-    if mention.role_hint and candidate.role:
-        if fuzzy_match(mention.role_hint, candidate.role) > 0.8:
-            score += 0.15
-    
-    # Temporal proximity (recent mentions cluster together)
-    days_since_last = days_between(mention.created_at, candidate.last_seen)
-    if days_since_last <= 7:
-        score += 0.10
-    elif days_since_last <= 30:
-        score += 0.05
-    
-    # Embedding similarity (if available - Phase 3G)
-    if mention.embedding and candidate.profile_embedding_id:
-        embedding = get_embedding(candidate.profile_embedding_id)
-        cos_sim = cosine_similarity(mention.embedding, embedding)
-        score += cos_sim * 0.05
-    
-    return min(score, 1.0)  # Cap at 1.0
+@dataclass
+class CandidateScore:
+    entity_id: str
+    score: float  # 0.0 - 1.0
+    confidence: str  # "HIGH" | "MEDIUM" | "LOW"
+    reasoning: str
 
-def get_attendee_emails_for_meetings(user_id: str, meeting_ids: list[str]) -> set[str]:
+def score_candidates(
+    mention: Mention,
+    candidates: list[Entity],
+    meeting_context: str,
+    llm: AnthropicClient
+) -> list[CandidateScore]:
     """
-    Fetch attendee emails for a list of meetings (on-demand).
+    LLM-based scoring of candidates for a mention.
     
-    Bounded by: len(meeting_ids) <= 10, so max 10 meeting lookups.
-    Uses batch_get for efficiency.
+    AI-first approach: Use LLM to score candidates with reasoning instead of
+    brittle weighted feature matching (Jaro-Winkler, Jaccard, etc.)
+    
+    Returns scored candidates sorted by score descending.
     """
-    if not meeting_ids:
-        return set()
+    if not candidates:
+        return []
     
-    meetings = batch_get_meetings(user_id, meeting_ids)
-    emails = set()
-    for meeting in meetings:
-        for attendee in meeting.attendees:
-            if attendee.email:
-                emails.add(attendee.email.lower())
-    return emails
+    # Build candidate descriptions
+    candidate_descs = []
+    for c in candidates:
+        desc = f"- ID: {c.entity_id}\n"
+        desc += f"  Name: {c.display_name}\n"
+        desc += f"  Aliases: {', '.join(c.aliases)}\n"
+        if c.organization:
+            desc += f"  Organization: {c.organization}\n"
+        if c.role:
+            desc += f"  Role: {c.role}\n"
+        desc += f"  Last seen: {c.last_seen or 'never'}"
+        candidate_descs.append(desc)
+    
+    prompt = f"""Score how likely each candidate entity matches a mention from a meeting transcript.
+
+Mention: "{mention.mention_text}"
+Context: "{mention.local_context}"
+{f'Role hint: "{mention.role_hint}"' if mention.role_hint else ''}
+{f'Organization hint: "{mention.org_hint}"' if mention.org_hint else ''}
+
+Meeting context:
+{meeting_context[:500]}
+
+Candidate entities:
+{chr(10).join(candidate_descs)}
+
+For each candidate, respond with a JSON array:
+[
+  {{
+    "entity_id": "<id>",
+    "score": <0.0-1.0>,
+    "confidence": "HIGH" | "MEDIUM" | "LOW",
+    "reasoning": "<one sentence>"
+  }},
+  ...
+]
+
+Scoring guidelines:
+- 0.85-1.0 (HIGH): Almost certainly the same person (name + context match strongly)
+- 0.50-0.84 (MEDIUM): Possibly the same person (some signals match)
+- 0.0-0.49 (LOW): Unlikely to be the same person
+- Consider: name similarity, role match, organization match, context clues
+"""
+    response = llm.complete(prompt, model="claude-3-haiku-20240307")
+    results = json.loads(response)
+    
+    scores = [
+        CandidateScore(
+            entity_id=r["entity_id"],
+            score=r["score"],
+            confidence=r["confidence"],
+            reasoning=r["reasoning"]
+        )
+        for r in results
+    ]
+    
+    return sorted(scores, key=lambda x: x.score, reverse=True)
 ```
 
 ### Candidate Retrieval
@@ -830,50 +847,33 @@ class CandidateQuery:
     speaker_email: str | None = None  # From diarization, if available
     mention_embedding: list[float] | None = None  # Phase 3G
 
-CANDIDATE_ATTENDEE_THRESHOLD = 0.6  # Lower than hard-link (0.85), filters irrelevant attendees
-
-def get_candidates(user_id: str, query: CandidateQuery) -> list[Entity]:
+def get_candidates(user_id: str, query: CandidateQuery, llm: AnthropicClient) -> list[Entity]:
     """
     Retrieve candidate entities that could match this mention.
-    Uses multiple signals, not just the name string.
     
-    This is critical for the "two Sams" problem - we need to find ALL
-    relevant candidates so scoring can disambiguate.
+    AI-first approach: Cast a wide net for retrieval, then use LLM scoring
+    to disambiguate. Better to have false positives in candidates than 
+    miss the right entity.
     
-    IMPORTANT: We don't add ALL attendees as candidates. In a 20-person meeting,
-    that would create huge candidate sets. We only add attendees who are plausible
-    matches for the mention text.
+    Retrieval is deliberately broad; scoring (LLM-based) handles precision.
     """
     candidates = set()
     
-    # 1. Alias/name match (fuzzy) from inverted index
+    # 1. All entities with aliases starting with mention text prefix
+    # This is a simple prefix match on the inverted index - fast, broad
     candidates.update(
-        query_entities_by_alias(user_id, query.mention_text, threshold=0.7)
+        query_entities_by_alias_prefix(user_id, query.mention_text.lower().split()[0])
     )
     
-    # 2. Attendee-based candidates (FILTERED - not all attendees)
-    # Only include attendees whose name fuzzy-matches the mention OR who are the speaker
-    for attendee in query.meeting_attendees:  # list[AttendeeInfo]
-        # Skip if no email (can't create/lookup entity)
-        if not attendee.email:
-            continue
-        
-        # Check if attendee name matches mention (lower threshold than hard-link)
-        name_match = fuzzy_match(query.mention_text, attendee.name)
-        
-        # Check if attendee is the speaker (from diarization)
-        is_speaker = (
-            query.speaker_email and 
-            attendee.email.lower() == query.speaker_email.lower()
-        )
-        
-        if name_match >= CANDIDATE_ATTENDEE_THRESHOLD or is_speaker:
+    # 2. All meeting attendees with email (potential matches)
+    # Let the LLM scorer decide which ones are relevant
+    for attendee in query.meeting_attendees:
+        if attendee.email:
             entity = get_entity_by_email(user_id, attendee.email)
             if entity:
                 candidates.add(entity)
     
-    # 3. Recent/proximal entities in same meetings (temporal clustering)
-    # Only add if name also has some similarity to mention
+    # 3. All entities from recent meetings (temporal proximity)
     # 
     # Implementation: get_entities_in_recent_meetings uses:
     #   1. Get recent meetings for user (from meetings table, last 30 days)
@@ -881,15 +881,20 @@ def get_candidates(user_id: str, query: CandidateQuery) -> list[Entity]:
     #   3. Collect unique linked_entity_ids from those mentions
     # This avoids a full-table scan by using the existing SK prefix pattern.
     recent_entities = get_entities_in_recent_meetings(user_id, query.meeting_id, days=30)
-    for entity in recent_entities:
-        if fuzzy_match(query.mention_text, entity.aliases) > 0.5:
-            candidates.add(entity)
+    candidates.update(recent_entities)
     
-    # 4. (Phase 3G) Embedding similarity
+    # 4. (Phase 3G) Embedding similarity for semantic matching
     # if query.mention_embedding:
-    #     candidates.update(vector_search(query.mention_embedding, top_k=5))
+    #     candidates.update(vector_search(query.mention_embedding, top_k=10))
     
-    return list(candidates)
+    # Cap candidates to avoid huge LLM context
+    # If too many, prioritize by recency
+    candidate_list = list(candidates)
+    if len(candidate_list) > 20:
+        candidate_list.sort(key=lambda e: e.last_seen or "", reverse=True)
+        candidate_list = candidate_list[:20]
+    
+    return candidate_list
 
 def get_entities_in_recent_meetings(user_id: str, current_meeting_id: str, days: int = 30) -> list[Entity]:
     """
@@ -1016,113 +1021,21 @@ class VerificationResult:
     errors: list[str]  # blocking errors
     warnings: list[str]  # non-blocking (fields stripped)
 
-MAX_QUOTE_LENGTH = 200  # Encourage short quotes for reliable verification
-
-def token_set_similarity(text_a: str, text_b: str) -> float:
-    """
-    Token-based similarity for text containment verification.
-    Better than Jaro-Winkler for longer strings.
-    
-    Returns: float 0.0 - 1.0 (Jaccard similarity over word tokens)
-    """
-    tokens_a = set(text_a.lower().split())
-    tokens_b = set(text_b.lower().split())
-    if not tokens_a or not tokens_b:
-        return 0.0
-    intersection = tokens_a & tokens_b
-    union = tokens_a | tokens_b
-    return len(intersection) / len(union)
-
-def contains_token_sequence(haystack: str, needle: str) -> bool:
-    """
-    Check if the tokens of 'needle' appear in order within 'haystack'.
-    
-    This prevents false positives from token-set similarity where
-    same tokens appear in different order/meaning.
-    
-    Example:
-      needle: "Sam works at Acme"
-      haystack: "At Acme, the CEO Sam works daily" → True (tokens appear in order)
-      haystack: "Acme works Sam at" → False (wrong order)
-    """
-    needle_tokens = needle.lower().split()
-    haystack_tokens = haystack.lower().split()
-    
-    if not needle_tokens:
-        return True
-    
-    needle_idx = 0
-    for token in haystack_tokens:
-        if token == needle_tokens[needle_idx]:
-            needle_idx += 1
-            if needle_idx == len(needle_tokens):
-                return True
-    
-    return False
-
-def check_quote_in_segments(
-    quote_norm: str,
-    primary_segment: TranscriptSegment,
-    segments: dict[str, TranscriptSegment],
-    segment_ids_ordered: list[str]  # ordered list for adjacency lookup
-) -> tuple[bool, str | None]:
-    """
-    Check if quote appears in segment. If not, check adjacent segments.
-    Returns (found, matched_segment_id)
-    
-    For fuzzy fallback, requires BOTH:
-    1. Token-set similarity >= 0.85
-    2. Quote tokens appear in order in segment (prevents wrong-order matches)
-    """
-    # Try primary segment first (exact substring)
-    if quote_norm in primary_segment.text_normalized:
-        return True, primary_segment.segment_id
-    
-    # Try token-set similarity on primary (requires BOTH conditions)
-    if (token_set_similarity(quote_norm, primary_segment.text_normalized) >= 0.85 and
-        contains_token_sequence(primary_segment.text_normalized, quote_norm)):
-        return True, primary_segment.segment_id
-    
-    # Quote might span segments - check adjacent segments
-    try:
-        idx = segment_ids_ordered.index(primary_segment.segment_id)
-    except ValueError:
-        return False, None
-    
-    # Check previous segment
-    if idx > 0:
-        prev_seg = segments.get(segment_ids_ordered[idx - 1])
-        if prev_seg:
-            combined = prev_seg.text_normalized + " " + primary_segment.text_normalized
-            if quote_norm in combined:
-                return True, primary_segment.segment_id
-            if (token_set_similarity(quote_norm, combined) >= 0.85 and
-                contains_token_sequence(combined, quote_norm)):
-                return True, primary_segment.segment_id
-    
-    # Check next segment
-    if idx < len(segment_ids_ordered) - 1:
-        next_seg = segments.get(segment_ids_ordered[idx + 1])
-        if next_seg:
-            combined = primary_segment.text_normalized + " " + next_seg.text_normalized
-            if quote_norm in combined:
-                return True, primary_segment.segment_id
-            if (token_set_similarity(quote_norm, combined) >= 0.85 and
-                contains_token_sequence(combined, quote_norm)):
-                return True, primary_segment.segment_id
-    
-    return False, None
-
 def verify_extraction(
     extraction: MentionExtraction, 
-    segments: dict[str, TranscriptSegment],  # segment_id → segment
-    segment_ids_ordered: list[str]  # for adjacency checks
+    segments: dict[str, TranscriptSegment],
+    segment_ids_ordered: list[str],
+    llm: AnthropicClient
 ) -> VerificationResult:
     """
-    Deterministic verification that extraction is grounded.
+    LLM-based verification that extraction is grounded in the transcript.
+    
+    AI-first approach: Use LLM to verify quote grounding instead of 
+    brittle substring/token matching. This handles transcription variations,
+    punctuation differences, and semantic equivalence.
     
     Returns a cleaned extraction with unverified optional fields stripped.
-    - Blocking errors (quote, mention, segment, timestamps): reject entire mention
+    - Blocking errors (quote, mention, segment): reject entire mention
     - Non-blocking errors (role_hint, org_hint): strip field and continue
     """
     errors = []      # Blocking - reject mention
@@ -1131,42 +1044,74 @@ def verify_extraction(
     # Make a copy to clean
     cleaned = extraction.copy()
     
-    # 0. Quote length check (warning only)
-    if len(extraction.quote) > MAX_QUOTE_LENGTH:
-        warnings.append(f"quote_too_long ({len(extraction.quote)} chars)")
-    
-    # 1. Segment must exist (BLOCKING)
+    # 1. Segment must exist (BLOCKING) - this is deterministic
     segment = segments.get(extraction.segment_id)
     if not segment:
         errors.append("segment_not_found")
         return VerificationResult(is_valid=False, cleaned_extraction=None, errors=errors, warnings=warnings)
     
-    # 2. Quote must appear in segment or adjacent segments (BLOCKING)
-    quote_norm = normalize_text(extraction.quote)
-    found, _ = check_quote_in_segments(quote_norm, segment, segments, segment_ids_ordered)
-    if not found:
-        errors.append("quote_not_in_segment")
+    # 2. Get adjacent segments for context
+    idx = segment_ids_ordered.index(extraction.segment_id) if extraction.segment_id in segment_ids_ordered else -1
+    context_segments = [segment.text]
+    if idx > 0:
+        prev_seg = segments.get(segment_ids_ordered[idx - 1])
+        if prev_seg:
+            context_segments.insert(0, prev_seg.text)
+    if idx >= 0 and idx < len(segment_ids_ordered) - 1:
+        next_seg = segments.get(segment_ids_ordered[idx + 1])
+        if next_seg:
+            context_segments.append(next_seg.text)
     
-    # 3. Mention text must appear in quote (BLOCKING)
-    mention_norm = normalize_text(extraction.mention_text)
-    if mention_norm not in quote_norm:
+    transcript_context = "\n".join(context_segments)
+    
+    # 3. LLM verification of grounding
+    prompt = f"""Verify that an extracted entity mention is grounded in the transcript.
+
+Transcript segment(s):
+\"\"\"
+{transcript_context}
+\"\"\"
+
+Extracted mention:
+- mention_text: "{extraction.mention_text}"
+- quote: "{extraction.quote}"
+- role_hint: {f'"{extraction.role_hint}"' if extraction.role_hint else 'null'}
+- org_hint: {f'"{extraction.org_hint}"' if extraction.org_hint else 'null'}
+
+Respond with ONLY a JSON object:
+{{
+  "quote_grounded": true | false,
+  "mention_in_quote": true | false,
+  "role_hint_valid": true | false | null,
+  "org_hint_valid": true | false | null,
+  "reasoning": "<one sentence>"
+}}
+
+Rules:
+- quote_grounded: The quote (or close paraphrase) appears in the transcript
+- mention_in_quote: The mention_text appears in or is referenced by the quote
+- role_hint_valid: The role/title is explicitly stated in the quote (null if no role_hint)
+- org_hint_valid: The organization is mentioned in the transcript context (null if no org_hint)
+"""
+    response = llm.complete(prompt, model="claude-3-haiku-20240307")
+    result = json.loads(response)
+    
+    # Apply verification results
+    if not result["quote_grounded"]:
+        errors.append("quote_not_grounded")
+    
+    if not result["mention_in_quote"]:
         errors.append("mention_not_in_quote")
     
-    # 4. Role hint verification (NON-BLOCKING - strip if invalid)
-    if cleaned.role_hint:
-        role_norm = normalize_text(cleaned.role_hint)
-        if role_norm not in quote_norm:
-            warnings.append("role_hint_not_in_quote")
-            cleaned.role_hint = None  # Strip unverified field
+    if extraction.role_hint and result["role_hint_valid"] is False:
+        warnings.append("role_hint_not_verified")
+        cleaned.role_hint = None
     
-    # 5. Org hint verification (NON-BLOCKING - strip if invalid)
-    if cleaned.org_hint:
-        org_norm = normalize_text(cleaned.org_hint)
-        if org_norm not in segment.text_normalized:
-            warnings.append("org_hint_not_in_segment")
-            cleaned.org_hint = None  # Strip unverified field
+    if extraction.org_hint and result["org_hint_valid"] is False:
+        warnings.append("org_hint_not_verified")
+        cleaned.org_hint = None
     
-    # 6. Timestamps must be valid and within segment bounds (BLOCKING)
+    # 4. Timestamps validation (deterministic)
     if extraction.t0 is not None and extraction.t1 is not None:
         if extraction.t0 < segment.t0 or extraction.t1 > segment.t1:
             errors.append("timestamps_outside_segment")
@@ -1182,11 +1127,11 @@ def verify_extraction(
     )
 ```
 
-**Key improvements:**
-- Verification against specific `segment_id`, not entire transcript
-- Normalized text comparison handles punctuation/spacing/case variations
-- Fuzzy fallback (0.90 threshold) for minor transcription differences
-- Timestamp validation against segment bounds
+**Key improvements (AI-first):**
+- LLM-based verification handles transcription variations, paraphrasing, semantic equivalence
+- No brittle string matching (substring, Jaro-Winkler, token-set similarity)
+- Uses Haiku model for speed and cost efficiency
+- Timestamp validation remains deterministic (simple math)
 
 ### Step 3: Verify Relationships (LLM Entailment)
 
@@ -1253,13 +1198,14 @@ def should_create_edge(entailment: EntailmentResult) -> bool:
 | Verification Type | When Applied | If Failed |
 |------------------|--------------|-----------|
 | Deterministic (segment exists) | All extractions | **BLOCKING** - mention rejected |
-| Deterministic (quote in segment + adjacent, token-set similarity) | All extractions | **BLOCKING** - mention rejected |
-| Deterministic (mention in quote, normalized) | All extractions | **BLOCKING** - mention rejected |
+| LLM verification (quote grounded in segment) | All extractions | **BLOCKING** - mention rejected |
+| LLM verification (mention in quote) | All extractions | **BLOCKING** - mention rejected |
 | Deterministic (timestamps within segment) | All extractions | **BLOCKING** - mention rejected |
-| Quote length check (≤200 chars) | All extractions | **WARNING** - logged, mention kept |
-| Deterministic (role_hint in quote, normalized) | Extractions with role_hint | **NON-BLOCKING** - role_hint stripped, mention kept |
-| Deterministic (org_hint in segment, normalized) | Extractions with org_hint | **NON-BLOCKING** - org_hint stripped, mention kept |
+| LLM verification (role_hint valid) | Extractions with role_hint | **NON-BLOCKING** - role_hint stripped, mention kept |
+| LLM verification (org_hint valid) | Extractions with org_hint | **NON-BLOCKING** - org_hint stripped, mention kept |
 | LLM Entailment (verdict=SUPPORTED) | WORKS_AT, RELATES_TO, INTRODUCED edges | **BLOCKING** - edge not created |
+
+**AI-first approach:** All semantic verification uses LLM (Haiku for speed/cost). Only structural checks (segment exists, timestamps valid) are deterministic.
 
 ---
 
@@ -1399,16 +1345,17 @@ def should_create_edge(entailment: EntailmentResult) -> bool:
 ## Safeguards
 
 1. **No edge without evidence** - every relationship must cite transcript segment
-2. **No role without evidence** - roles extracted only if verbatim in quote
-3. **Deterministic verification** - quote must appear in transcript, mention in quote
+2. **No role without evidence** - roles extracted only if LLM verifies in quote
+3. **LLM-based verification** - all semantic checks use LLM (no brittle string matching)
 4. **LLM entailment verification** - for relationship edges (WORKS_AT, RELATES_TO, etc.)
 5. **Confidence thresholds** - only high-confidence facts used for meeting priming
 6. **Separate mention/entity states** - ambiguous mentions DON'T create entities
 7. **Provisional entities** - only created when score <= LOW (no match found)
-8. **Fuzzy attendee match = hard link** - high-confidence unambiguous mention→attendee match bypasses scoring (Step 0)
+8. **LLM attendee match = hard link** - if LLM determines unambiguous match, bypass scoring (Step 0)
 9. **Evidence capped** - max 10 on entity, overflow to separate table
 10. **Merge/split audit log** - track all entity merges for debugging
 11. **Dual-write edges** - enables efficient bidirectional queries
+12. **AI-first design** - LLM handles semantic understanding; only structural checks are deterministic
 
 ---
 
