@@ -99,7 +99,7 @@ merged_at: ISO8601 (nullable) - when merge occurred
 organization: string (nullable) - derived from WORKS_AT edge
 role: string (nullable) - most recent role_hint from mentions
 recent_meeting_ids: [string, max 10] - meetings where entity appeared recently
-recent_attendee_emails: [string] - emails of people in recent_meeting_ids (for overlap scoring)
+# NOTE: recent_attendee_emails is computed on-demand, not stored (see scoring function)
 
 profile_embedding_id: string (pointer to vector store, nullable)
 top_evidence: [max 10 items] - {meeting_id, quote, t0, t1, type}
@@ -113,8 +113,11 @@ updated_at: ISO8601
 **Derived field maintenance:**
 - `organization`: Set when WORKS_AT edge is created (from verified extraction)
 - `role`: Updated when a mention with role_hint is linked to this entity
-- `recent_meeting_ids`: Append on each new mention, keep last 10
-- `recent_attendee_emails`: Union of attendee emails from recent_meeting_ids
+- `recent_meeting_ids`: Append on each new mention, keep last 10 (FIFO)
+
+**On-demand computation (not stored):**
+- `recent_attendee_emails`: Computed during scoring by fetching attendees from `recent_meeting_ids`
+- This avoids unbounded growth for high-volume users (execs with many meetings)
 
 **GSI1** (for listing entities by type):
 - GSI1PK: `USER#<user_id>#TYPE#<type>`
@@ -228,14 +231,20 @@ Enables fast alias → entity lookups for candidate retrieval.
 **Attributes:**
 ```
 entity_id: string
+normalized_alias: string - for GSI1 SK
 original_alias: string - the un-normalized form (for display)
 created_at: ISO8601
 ```
 
+**GSI1** (for entity-based alias lookups, used in merge):
+- GSI1PK: `USER#<user_id>#ENTITY#<entity_id>`
+- GSI1SK: `<normalized_alias>`
+
 **Why this key design:**
-- DynamoDB Query requires PK equality; `begins_with` only works on SK
+- Base table: DynamoDB Query requires PK equality; `begins_with` only works on SK
 - SK format `<alias>#ENTITY#<id>` allows prefix matching on alias
 - Multiple entities can share the same alias (handled by entity_id in SK)
+- GSI1: Enables "get all aliases for entity X" (needed for merge rewrite)
 
 **Write pattern:** When adding an alias to an entity, also write to this table:
 ```python
@@ -245,12 +254,16 @@ def add_alias(user_id: str, entity_id: str, alias: str):
     # 1. Add to entity's aliases array
     update_entity_aliases(user_id, entity_id, alias)
     
-    # 2. Write to inverted index
+    # 2. Write to inverted index (includes GSI1 attributes)
     put_item(
         PK=f"USER#{user_id}#ALIASES",
         SK=f"{normalized}#ENTITY#{entity_id}",
         entity_id=entity_id,
+        normalized_alias=normalized,
         original_alias=alias,
+        # GSI1 attributes for entity-based lookup
+        GSI1PK=f"USER#{user_id}#ENTITY#{entity_id}",
+        GSI1SK=normalized,
     )
 
 def normalize_alias(alias: str) -> str:
@@ -376,49 +389,147 @@ def merge_entities(user_id: str, from_id: str, to_id: str) -> MergeResult:
             )
             counts["mentions"] += 1
         
-        # 2. Migrate edges (must delete + recreate due to entity ID in SK)
-        # Outgoing edges FROM from_id
+        # 2. Migrate edges (deduplicated, with evidence merging)
+        # 
+        # Edge migration is complex because:
+        # - Same logical edge can appear in both EDGEOUT and EDGEIN queries
+        # - Target entity may already have an edge to the same destination
+        # - We need to merge evidence when edges collide
+        #
+        # Strategy: collect all logical edges, dedupe, then write once
+        
+        @dataclass
+        class LogicalEdge:
+            from_id: str
+            to_id: str
+            edge_type: str
+            evidence: list
+            properties: dict
+            
+            @property
+            def edge_key(self) -> tuple:
+                """Canonical key for deduplication."""
+                return (self.from_id, self.to_id, self.edge_type)
+        
+        edges_to_migrate: dict[tuple, LogicalEdge] = {}  # edge_key → LogicalEdge
+        edges_to_delete: list[tuple] = []  # (PK, SK) pairs
+        
+        # Collect outgoing edges FROM from_id
         out_edges = query(PK=f"USER#{user_id}", SK begins_with f"EDGEOUT#{from_id}#")
         for edge in out_edges:
-            new_sk = edge.sk.replace(f"EDGEOUT#{from_id}#", f"EDGEOUT#{to_id}#")
-            # Also update EDGEIN counterpart
-            old_in_sk = f"EDGEIN#{edge.to_entity_id}#{edge.edge_type}#{from_id}"
-            new_in_sk = f"EDGEIN#{edge.to_entity_id}#{edge.edge_type}#{to_id}"
+            # Rewrite: from_id → to_id (the merge target)
+            new_from = to_id
+            new_to = edge.to_entity_id
             
-            # Transact: delete old, write new (both directions)
-            transact_write([
-                Delete(PK=edge.pk, SK=edge.sk),
-                Delete(PK=edge.pk, SK=old_in_sk),
-                Put(PK=edge.pk, SK=new_sk, **edge.attrs, from_entity_id=to_id),
-                Put(PK=edge.pk, SK=new_in_sk, **edge.attrs, from_entity_id=to_id),
-            ])
-            counts["edges"] += 1
+            # Skip self-loops that would be created by merge
+            if new_from == new_to:
+                continue
+                
+            key = (new_from, new_to, edge.edge_type)
+            if key not in edges_to_migrate:
+                edges_to_migrate[key] = LogicalEdge(
+                    from_id=new_from, to_id=new_to, edge_type=edge.edge_type,
+                    evidence=edge.evidence or [], properties=edge.properties or {}
+                )
+            else:
+                # Merge evidence from duplicate
+                edges_to_migrate[key].evidence.extend(edge.evidence or [])
+            
+            # Mark old items for deletion
+            edges_to_delete.append((edge.pk, edge.sk))
+            edges_to_delete.append((edge.pk, f"EDGEIN#{edge.to_entity_id}#{edge.edge_type}#{from_id}"))
         
-        # Incoming edges TO from_id
+        # Collect incoming edges TO from_id
         in_edges = query(PK=f"USER#{user_id}", SK begins_with f"EDGEIN#{from_id}#")
         for edge in in_edges:
-            new_sk = edge.sk.replace(f"EDGEIN#{from_id}#", f"EDGEIN#{to_id}#")
-            old_out_sk = f"EDGEOUT#{edge.from_entity_id}#{edge.edge_type}#{from_id}"
-            new_out_sk = f"EDGEOUT#{edge.from_entity_id}#{edge.edge_type}#{to_id}"
+            # Rewrite: to_id becomes to_id (the merge target)
+            new_from = edge.from_entity_id
+            new_to = to_id
             
-            transact_write([
-                Delete(PK=edge.pk, SK=edge.sk),
-                Delete(PK=edge.pk, SK=old_out_sk),
-                Put(PK=edge.pk, SK=new_sk, **edge.attrs, to_entity_id=to_id),
-                Put(PK=edge.pk, SK=new_out_sk, **edge.attrs, to_entity_id=to_id),
-            ])
+            # Skip self-loops
+            if new_from == new_to:
+                continue
+            
+            key = (new_from, new_to, edge.edge_type)
+            if key not in edges_to_migrate:
+                edges_to_migrate[key] = LogicalEdge(
+                    from_id=new_from, to_id=new_to, edge_type=edge.edge_type,
+                    evidence=edge.evidence or [], properties=edge.properties or {}
+                )
+            else:
+                edges_to_migrate[key].evidence.extend(edge.evidence or [])
+            
+            edges_to_delete.append((edge.pk, edge.sk))
+            edges_to_delete.append((edge.pk, f"EDGEOUT#{edge.from_entity_id}#{edge.edge_type}#{from_id}"))
+        
+        # Check for existing edges on target entity and merge evidence
+        for key, logical_edge in edges_to_migrate.items():
+            existing_sk = f"EDGEOUT#{logical_edge.from_id}#{logical_edge.edge_type}#{logical_edge.to_id}"
+            existing = get_item(PK=f"USER#{user_id}", SK=existing_sk)
+            if existing:
+                # Merge evidence with existing edge
+                logical_edge.evidence = merge_edge_evidence(
+                    existing.evidence or [], 
+                    logical_edge.evidence,
+                    max_evidence=5
+                )
+                # Mark existing for deletion (will be rewritten with merged evidence)
+                edges_to_delete.append((f"USER#{user_id}", existing_sk))
+                edges_to_delete.append((f"USER#{user_id}", 
+                    f"EDGEIN#{logical_edge.to_id}#{logical_edge.edge_type}#{logical_edge.from_id}"))
+        
+        # Dedupe delete list
+        edges_to_delete = list(set(edges_to_delete))
+        
+        # Execute: delete old edges, write new edges (batched)
+        for pk, sk in edges_to_delete:
+            delete_item(PK=pk, SK=sk)
+        
+        for logical_edge in edges_to_migrate.values():
+            # Write both directions
+            put_item(
+                PK=f"USER#{user_id}",
+                SK=f"EDGEOUT#{logical_edge.from_id}#{logical_edge.edge_type}#{logical_edge.to_id}",
+                from_entity_id=logical_edge.from_id,
+                to_entity_id=logical_edge.to_id,
+                edge_type=logical_edge.edge_type,
+                evidence=logical_edge.evidence[:5],  # Cap evidence
+                properties=logical_edge.properties,
+            )
+            put_item(
+                PK=f"USER#{user_id}",
+                SK=f"EDGEIN#{logical_edge.to_id}#{logical_edge.edge_type}#{logical_edge.from_id}",
+                from_entity_id=logical_edge.from_id,
+                to_entity_id=logical_edge.to_id,
+                edge_type=logical_edge.edge_type,
+                evidence=logical_edge.evidence[:5],
+                properties=logical_edge.properties,
+            )
             counts["edges"] += 1
         
-        # 3. Migrate aliases in inverted index
+        # 3. Migrate aliases in inverted index (using GSI1 for entity lookup)
         aliases = query(
-            PK=f"USER#{user_id}#ALIASES",
-            SK contains f"#ENTITY#{from_id}"
+            IndexName="GSI1",
+            KeyConditionExpression="GSI1PK = :pk",
+            ExpressionAttributeValues={
+                ":pk": f"USER#{user_id}#ENTITY#{from_id}"
+            }
         )
         for alias_item in aliases:
-            new_sk = alias_item.sk.replace(f"#ENTITY#{from_id}", f"#ENTITY#{to_id}")
+            old_sk = f"{alias_item.normalized_alias}#ENTITY#{from_id}"
+            new_sk = f"{alias_item.normalized_alias}#ENTITY#{to_id}"
             transact_write([
-                Delete(PK=alias_item.pk, SK=alias_item.sk),
-                Put(PK=alias_item.pk, SK=new_sk, entity_id=to_id, **alias_item.attrs),
+                Delete(PK=f"USER#{user_id}#ALIASES", SK=old_sk),
+                Put(
+                    PK=f"USER#{user_id}#ALIASES",
+                    SK=new_sk,
+                    entity_id=to_id,
+                    normalized_alias=alias_item.normalized_alias,
+                    original_alias=alias_item.original_alias,
+                    # Update GSI1 attributes
+                    GSI1PK=f"USER#{user_id}#ENTITY#{to_id}",
+                    GSI1SK=alias_item.normalized_alias,
+                ),
             ])
             counts["aliases"] += 1
         
@@ -455,6 +566,26 @@ def merge_entities(user_id: str, from_id: str, to_id: str) -> MergeResult:
     except Exception as e:
         update_merge_record(user_id, merge_id, status="failed", error=str(e))
         raise
+```
+
+**Helper functions:**
+```python
+def merge_edge_evidence(existing: list, new: list, max_evidence: int = 5) -> list:
+    """
+    Merge evidence from two edges, dedupe by meeting_id + quote, keep most recent.
+    """
+    all_evidence = existing + new
+    # Dedupe by (meeting_id, quote hash)
+    seen = set()
+    unique = []
+    for e in all_evidence:
+        key = (e.get("meeting_id"), hash(e.get("quote", "")))
+        if key not in seen:
+            seen.add(key)
+            unique.append(e)
+    # Sort by timestamp descending, take top N
+    unique.sort(key=lambda x: x.get("t0", 0), reverse=True)
+    return unique[:max_evidence]
 ```
 
 **Idempotency guarantees:**
@@ -617,7 +748,8 @@ def score_candidate(mention: Mention, candidate: Entity) -> float:
     - mention.role_hint: extracted from quote
     - mention.created_at: when mention was stored
     - candidate.aliases: from entity record
-    - candidate.recent_attendee_emails: derived from recent_meeting_ids
+    - candidate.recent_meeting_ids: stored on entity (max 10)
+    - get_attendee_emails_for_meetings(): computed on-demand from recent_meeting_ids
     - candidate.organization: derived from WORKS_AT edge
     - candidate.role: from most recent role_hint
     - candidate.last_seen: updated on each linked mention
@@ -629,9 +761,14 @@ def score_candidate(mention: Mention, candidate: Entity) -> float:
     score += name_sim * 0.25
     
     # Attendee overlap (same people in meeting → likely same context)
+    # Compute on-demand from recent_meeting_ids to avoid unbounded storage
+    candidate_attendee_emails = get_attendee_emails_for_meetings(
+        user_id, 
+        candidate.recent_meeting_ids  # max 10 meetings
+    )
     attendee_overlap = jaccard(
         set(mention.meeting_attendee_emails), 
-        set(candidate.recent_attendee_emails)
+        set(candidate_attendee_emails)
     )
     score += attendee_overlap * 0.25
     
@@ -659,6 +796,24 @@ def score_candidate(mention: Mention, candidate: Entity) -> float:
         score += cos_sim * 0.05
     
     return min(score, 1.0)  # Cap at 1.0
+
+def get_attendee_emails_for_meetings(user_id: str, meeting_ids: list[str]) -> set[str]:
+    """
+    Fetch attendee emails for a list of meetings (on-demand).
+    
+    Bounded by: len(meeting_ids) <= 10, so max 10 meeting lookups.
+    Uses batch_get for efficiency.
+    """
+    if not meeting_ids:
+        return set()
+    
+    meetings = batch_get_meetings(user_id, meeting_ids)
+    emails = set()
+    for meeting in meetings:
+        for attendee in meeting.attendees:
+            if attendee.email:
+                emails.add(attendee.email.lower())
+    return emails
 ```
 
 ### Candidate Retrieval
@@ -719,6 +874,12 @@ def get_candidates(user_id: str, query: CandidateQuery) -> list[Entity]:
     
     # 3. Recent/proximal entities in same meetings (temporal clustering)
     # Only add if name also has some similarity to mention
+    # 
+    # Implementation: get_entities_in_recent_meetings uses:
+    #   1. Get recent meetings for user (from meetings table, last 30 days)
+    #   2. For each meeting, query mentions: SK begins_with "MENTION#<meeting_id>#"
+    #   3. Collect unique linked_entity_ids from those mentions
+    # This avoids a full-table scan by using the existing SK prefix pattern.
     recent_entities = get_entities_in_recent_meetings(user_id, query.meeting_id, days=30)
     for entity in recent_entities:
         if fuzzy_match(query.mention_text, entity.aliases) > 0.5:
@@ -729,6 +890,37 @@ def get_candidates(user_id: str, query: CandidateQuery) -> list[Entity]:
     #     candidates.update(vector_search(query.mention_embedding, top_k=5))
     
     return list(candidates)
+
+def get_entities_in_recent_meetings(user_id: str, current_meeting_id: str, days: int = 30) -> list[Entity]:
+    """
+    Get entities that appeared in recent meetings (for temporal clustering).
+    
+    Implementation uses existing key patterns (no new indexes needed):
+    1. Query recent meetings from meetings table (last N days)
+    2. For each meeting, query mentions by SK prefix
+    3. Collect unique entity IDs
+    
+    Bounded by: ~30 days of meetings × mentions per meeting
+    """
+    # Get recent meeting IDs (excluding current)
+    cutoff = datetime.now() - timedelta(days=days)
+    recent_meetings = query_meetings_since(user_id, cutoff)
+    meeting_ids = [m.meeting_id for m in recent_meetings if m.meeting_id != current_meeting_id]
+    
+    # Collect entity IDs from mentions in those meetings
+    entity_ids = set()
+    for meeting_id in meeting_ids[:20]:  # Cap to avoid too many queries
+        mentions = query(
+            PK=f"USER#{user_id}",
+            KeyConditionExpression="SK begins_with :prefix",
+            ExpressionAttributeValues={":prefix": f"MENTION#{meeting_id}#"}
+        )
+        for mention in mentions:
+            if mention.linked_entity_id:
+                entity_ids.add(mention.linked_entity_id)
+    
+    # Batch fetch entities
+    return batch_get_entities(user_id, list(entity_ids))
 ```
 
 ---
@@ -841,6 +1033,33 @@ def token_set_similarity(text_a: str, text_b: str) -> float:
     union = tokens_a | tokens_b
     return len(intersection) / len(union)
 
+def contains_token_sequence(haystack: str, needle: str) -> bool:
+    """
+    Check if the tokens of 'needle' appear in order within 'haystack'.
+    
+    This prevents false positives from token-set similarity where
+    same tokens appear in different order/meaning.
+    
+    Example:
+      needle: "Sam works at Acme"
+      haystack: "At Acme, the CEO Sam works daily" → True (tokens appear in order)
+      haystack: "Acme works Sam at" → False (wrong order)
+    """
+    needle_tokens = needle.lower().split()
+    haystack_tokens = haystack.lower().split()
+    
+    if not needle_tokens:
+        return True
+    
+    needle_idx = 0
+    for token in haystack_tokens:
+        if token == needle_tokens[needle_idx]:
+            needle_idx += 1
+            if needle_idx == len(needle_tokens):
+                return True
+    
+    return False
+
 def check_quote_in_segments(
     quote_norm: str,
     primary_segment: TranscriptSegment,
@@ -850,13 +1069,18 @@ def check_quote_in_segments(
     """
     Check if quote appears in segment. If not, check adjacent segments.
     Returns (found, matched_segment_id)
+    
+    For fuzzy fallback, requires BOTH:
+    1. Token-set similarity >= 0.85
+    2. Quote tokens appear in order in segment (prevents wrong-order matches)
     """
     # Try primary segment first (exact substring)
     if quote_norm in primary_segment.text_normalized:
         return True, primary_segment.segment_id
     
-    # Try token-set similarity on primary (handles minor variations)
-    if token_set_similarity(quote_norm, primary_segment.text_normalized) >= 0.85:
+    # Try token-set similarity on primary (requires BOTH conditions)
+    if (token_set_similarity(quote_norm, primary_segment.text_normalized) >= 0.85 and
+        contains_token_sequence(primary_segment.text_normalized, quote_norm)):
         return True, primary_segment.segment_id
     
     # Quote might span segments - check adjacent segments
@@ -870,15 +1094,21 @@ def check_quote_in_segments(
         prev_seg = segments.get(segment_ids_ordered[idx - 1])
         if prev_seg:
             combined = prev_seg.text_normalized + " " + primary_segment.text_normalized
-            if quote_norm in combined or token_set_similarity(quote_norm, combined) >= 0.85:
-                return True, primary_segment.segment_id  # Keep original segment_id
+            if quote_norm in combined:
+                return True, primary_segment.segment_id
+            if (token_set_similarity(quote_norm, combined) >= 0.85 and
+                contains_token_sequence(combined, quote_norm)):
+                return True, primary_segment.segment_id
     
     # Check next segment
     if idx < len(segment_ids_ordered) - 1:
         next_seg = segments.get(segment_ids_ordered[idx + 1])
         if next_seg:
             combined = primary_segment.text_normalized + " " + next_seg.text_normalized
-            if quote_norm in combined or token_set_similarity(quote_norm, combined) >= 0.85:
+            if quote_norm in combined:
+                return True, primary_segment.segment_id
+            if (token_set_similarity(quote_norm, combined) >= 0.85 and
+                contains_token_sequence(combined, quote_norm)):
                 return True, primary_segment.segment_id
     
     return False, None
