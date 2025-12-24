@@ -88,9 +88,12 @@ display_name: "Sam"
 canonical_name: "Samuel Johnson" (optional, user-confirmed)
 primary_email: string (nullable) - deterministic identifier for Person
 aliases: ["Sam", "Samuel", "sam@acme.com"]
-status: resolved | provisional
+status: resolved | provisional | merged
   - resolved: has a strong identifier (email) or user-confirmed
   - provisional: created from mentions, awaiting confirmation
+  - merged: entity was merged into another (tombstone)
+merged_into: string (nullable) - target entity_id if status=merged
+merged_at: ISO8601 (nullable) - when merge occurred
 
 # Cached/derived fields for scoring (updated on new evidence)
 organization: string (nullable) - derived from WORKS_AT edge
@@ -143,6 +146,7 @@ evidence:
   quote: string - exact substring from transcript (verified)
 role_hint: string (nullable) - "CFO", "recruiter", etc.
 org_hint: string (nullable) - organization mentioned in same context (e.g., "Acme Corp")
+speaker_email: string (nullable) - email of speaker from diarization (if mapped)
 meeting_attendee_emails: [string] - attendees of the meeting (for overlap scoring)
 resolution_state: linked | ambiguous | new_entity_created
   - linked: successfully matched to existing entity
@@ -218,8 +222,8 @@ Enables fast alias → entity lookups for candidate retrieval.
 
 | Key | Description |
 |-----|-------------|
-| PK: `USER#<user_id>#ALIAS#<normalized_alias>` | Normalized alias (lowercase, trimmed) |
-| SK: `ENTITY#<entity_id>` | Entity this alias belongs to |
+| PK: `USER#<user_id>#ALIASES` | Partition by user (fixed suffix) |
+| SK: `<normalized_alias>#ENTITY#<entity_id>` | Alias + entity (enables prefix queries) |
 
 **Attributes:**
 ```
@@ -227,6 +231,11 @@ entity_id: string
 original_alias: string - the un-normalized form (for display)
 created_at: ISO8601
 ```
+
+**Why this key design:**
+- DynamoDB Query requires PK equality; `begins_with` only works on SK
+- SK format `<alias>#ENTITY#<id>` allows prefix matching on alias
+- Multiple entities can share the same alias (handled by entity_id in SK)
 
 **Write pattern:** When adding an alias to an entity, also write to this table:
 ```python
@@ -238,14 +247,14 @@ def add_alias(user_id: str, entity_id: str, alias: str):
     
     # 2. Write to inverted index
     put_item(
-        PK=f"USER#{user_id}#ALIAS#{normalized}",
-        SK=f"ENTITY#{entity_id}",
+        PK=f"USER#{user_id}#ALIASES",
+        SK=f"{normalized}#ENTITY#{entity_id}",
         entity_id=entity_id,
         original_alias=alias,
     )
 
 def normalize_alias(alias: str) -> str:
-    """Normalize for index lookup. Keep simple for exact prefix matching."""
+    """Normalize for index lookup. Keep simple for prefix matching."""
     return alias.lower().strip()
 ```
 
@@ -258,27 +267,29 @@ def query_entities_by_alias(user_id: str, mention_text: str, threshold: float = 
     """
     normalized = normalize_alias(mention_text)
     
-    # Query all aliases that start with the normalized mention (prefix match)
-    # This catches "Sam" → "sam", "samuel", "samantha", etc.
+    # Query all aliases that start with the normalized mention
+    # This catches "sam" → "sam", "samuel", "samantha", etc.
     results = query(
-        PK=f"USER#{user_id}#ALIAS#{normalized}",  # Exact match first
-    )
-    
-    # Also query prefix matches for partial names
-    prefix_results = query(
-        KeyConditionExpression="begins_with(PK, :prefix)",
-        ExpressionAttributeValues={":prefix": f"USER#{user_id}#ALIAS#{normalized}"}
+        KeyConditionExpression="PK = :pk AND begins_with(SK, :prefix)",
+        ExpressionAttributeValues={
+            ":pk": f"USER#{user_id}#ALIASES",
+            ":prefix": normalized
+        }
     )
     
     # Deduplicate entity IDs and fetch full entities
-    entity_ids = {r["entity_id"] for r in results + prefix_results}
+    entity_ids = {r["entity_id"] for r in results}
     entities = [get_entity_by_id(user_id, eid) for eid in entity_ids]
     
-    # Filter by fuzzy score threshold
+    # Filter by fuzzy score threshold (handles partial matches)
     return [e for e in entities if fuzzy_match(mention_text, e.aliases) >= threshold]
 ```
 
-**Note:** For MVP, exact and prefix matching on normalized aliases is sufficient. Full fuzzy search (edit distance) can be added later with OpenSearch.
+**Examples:**
+- Query `begins_with(SK, "sam")` matches: `sam#ENTITY#123`, `samuel#ENTITY#456`, `samantha#ENTITY#789`
+- Query `begins_with(SK, "samuel johnson")` matches: `samuel johnson#ENTITY#123`
+
+**Note:** For MVP, prefix matching on normalized aliases is sufficient. Full fuzzy search (edit distance) can be added later with OpenSearch.
 
 ---
 
@@ -306,6 +317,155 @@ created_at: ISO8601
 - Entity stores `top_evidence` (max 10): 5 most recent + 5 highest-confidence
 - Full evidence lives primarily on mentions/edges
 - Overflow table for historical access when needed
+
+---
+
+### Entity Merge Procedure
+
+Merging entities requires rewriting data across multiple tables. This procedure is idempotent and audit-logged.
+
+**Merge audit log item** (stored in `kairos-entities` table):
+| Key | Description |
+|-----|-------------|
+| PK: `USER#<user_id>` | Partition by user |
+| SK: `MERGE#<timestamp>#<from_id>#<to_id>` | Merge record |
+
+**Attributes:**
+```
+from_entity_id: string - entity being merged away
+to_entity_id: string - entity being kept (target)
+status: pending | in_progress | completed | failed
+started_at: ISO8601
+completed_at: ISO8601 (nullable)
+items_migrated: {mentions: int, edges: int, aliases: int}
+error: string (nullable)
+```
+
+**Merge procedure (idempotent):**
+```python
+def merge_entities(user_id: str, from_id: str, to_id: str) -> MergeResult:
+    """
+    Merge from_entity into to_entity. Idempotent - safe to re-run.
+    
+    Rewrites:
+    1. Mentions: update linked_entity_id, GSI1 will auto-update
+    2. Edges: delete old SK, write new SK (entity ID is in SK)
+    3. Aliases: delete old index entries, write new ones
+    4. Evidence overflow: rewrite PK
+    5. Source entity: mark as merged (tombstone)
+    """
+    merge_id = f"MERGE#{iso_now()}#{from_id}#{to_id}"
+    
+    # Check for existing merge (idempotency)
+    existing = get_merge_record(user_id, from_id, to_id)
+    if existing and existing.status == "completed":
+        return MergeResult(already_completed=True)
+    
+    # Create/update audit record
+    put_merge_record(user_id, merge_id, status="in_progress")
+    
+    try:
+        counts = {"mentions": 0, "edges": 0, "aliases": 0}
+        
+        # 1. Migrate mentions (GSI1 auto-updates on linked_entity_id change)
+        mentions = query_mentions_by_entity(user_id, from_id)
+        for mention in mentions:
+            update_item(
+                PK=mention.pk, SK=mention.sk,
+                SET linked_entity_id = to_id
+            )
+            counts["mentions"] += 1
+        
+        # 2. Migrate edges (must delete + recreate due to entity ID in SK)
+        # Outgoing edges FROM from_id
+        out_edges = query(PK=f"USER#{user_id}", SK begins_with f"EDGEOUT#{from_id}#")
+        for edge in out_edges:
+            new_sk = edge.sk.replace(f"EDGEOUT#{from_id}#", f"EDGEOUT#{to_id}#")
+            # Also update EDGEIN counterpart
+            old_in_sk = f"EDGEIN#{edge.to_entity_id}#{edge.edge_type}#{from_id}"
+            new_in_sk = f"EDGEIN#{edge.to_entity_id}#{edge.edge_type}#{to_id}"
+            
+            # Transact: delete old, write new (both directions)
+            transact_write([
+                Delete(PK=edge.pk, SK=edge.sk),
+                Delete(PK=edge.pk, SK=old_in_sk),
+                Put(PK=edge.pk, SK=new_sk, **edge.attrs, from_entity_id=to_id),
+                Put(PK=edge.pk, SK=new_in_sk, **edge.attrs, from_entity_id=to_id),
+            ])
+            counts["edges"] += 1
+        
+        # Incoming edges TO from_id
+        in_edges = query(PK=f"USER#{user_id}", SK begins_with f"EDGEIN#{from_id}#")
+        for edge in in_edges:
+            new_sk = edge.sk.replace(f"EDGEIN#{from_id}#", f"EDGEIN#{to_id}#")
+            old_out_sk = f"EDGEOUT#{edge.from_entity_id}#{edge.edge_type}#{from_id}"
+            new_out_sk = f"EDGEOUT#{edge.from_entity_id}#{edge.edge_type}#{to_id}"
+            
+            transact_write([
+                Delete(PK=edge.pk, SK=edge.sk),
+                Delete(PK=edge.pk, SK=old_out_sk),
+                Put(PK=edge.pk, SK=new_sk, **edge.attrs, to_entity_id=to_id),
+                Put(PK=edge.pk, SK=new_out_sk, **edge.attrs, to_entity_id=to_id),
+            ])
+            counts["edges"] += 1
+        
+        # 3. Migrate aliases in inverted index
+        aliases = query(
+            PK=f"USER#{user_id}#ALIASES",
+            SK contains f"#ENTITY#{from_id}"
+        )
+        for alias_item in aliases:
+            new_sk = alias_item.sk.replace(f"#ENTITY#{from_id}", f"#ENTITY#{to_id}")
+            transact_write([
+                Delete(PK=alias_item.pk, SK=alias_item.sk),
+                Put(PK=alias_item.pk, SK=new_sk, entity_id=to_id, **alias_item.attrs),
+            ])
+            counts["aliases"] += 1
+        
+        # 4. Merge entity attributes (aliases, evidence, counts)
+        from_entity = get_entity(user_id, from_id)
+        to_entity = get_entity(user_id, to_id)
+        
+        merged_aliases = list(set(to_entity.aliases + from_entity.aliases))
+        merged_evidence = merge_top_evidence(to_entity.top_evidence, from_entity.top_evidence)
+        
+        update_entity(user_id, to_id, 
+            aliases=merged_aliases,
+            top_evidence=merged_evidence,
+            mention_count=to_entity.mention_count + from_entity.mention_count,
+            edge_count=to_entity.edge_count + from_entity.edge_count,
+        )
+        
+        # 5. Tombstone the source entity
+        update_entity(user_id, from_id,
+            status="merged",
+            merged_into=to_id,
+            merged_at=iso_now(),
+        )
+        
+        # Update audit record
+        update_merge_record(user_id, merge_id, 
+            status="completed", 
+            completed_at=iso_now(),
+            items_migrated=counts
+        )
+        
+        return MergeResult(success=True, counts=counts)
+        
+    except Exception as e:
+        update_merge_record(user_id, merge_id, status="failed", error=str(e))
+        raise
+```
+
+**Idempotency guarantees:**
+- Check for existing completed merge before starting
+- Tombstoned entity has `merged_into` pointer for redirects
+- Re-running on partial failure will skip already-migrated items (transact_write is atomic per batch)
+
+**Tombstone behavior:**
+- Source entity marked `status="merged"` with `merged_into=to_id`
+- Lookups by `from_id` can follow redirect to `to_id`
+- Tombstone preserved for audit trail (never deleted)
 
 ---
 
@@ -347,11 +507,14 @@ def resolve_mention(mention, user_id, meeting_attendees: list[AttendeeInfo]):
     # Step 1: Retrieve candidates with rich context
     candidates = get_candidates(
         user_id=user_id,
-        mention_text=mention.text,
-        meeting_id=mention.meeting_id,
-        attendee_emails=mention.meeting_attendees,
-        local_context=mention.local_context,
-        role_hint=mention.role_hint,
+        query=CandidateQuery(
+            mention_text=mention.mention_text,
+            meeting_id=mention.evidence.meeting_id,
+            meeting_attendees=meeting_attendees,  # list[AttendeeInfo] from Meeting
+            local_context=mention.local_context,
+            role_hint=mention.role_hint,
+            speaker_email=mention.speaker_email,  # from diarization, if available
+        )
     )
     
     # Step 2: Score each candidate (email matches already handled above)
@@ -506,10 +669,13 @@ class CandidateQuery:
     """Rich query object for candidate retrieval."""
     mention_text: str
     meeting_id: str
-    attendee_emails: list[str]
+    meeting_attendees: list[AttendeeInfo]  # Full attendee info, not just emails
     local_context: str
     role_hint: str | None = None
+    speaker_email: str | None = None  # From diarization, if available
     mention_embedding: list[float] | None = None  # Phase 3G
+
+CANDIDATE_ATTENDEE_THRESHOLD = 0.6  # Lower than hard-link (0.85), filters irrelevant attendees
 
 def get_candidates(user_id: str, query: CandidateQuery) -> list[Entity]:
     """
@@ -518,22 +684,41 @@ def get_candidates(user_id: str, query: CandidateQuery) -> list[Entity]:
     
     This is critical for the "two Sams" problem - we need to find ALL
     relevant candidates so scoring can disambiguate.
+    
+    IMPORTANT: We don't add ALL attendees as candidates. In a 20-person meeting,
+    that would create huge candidate sets. We only add attendees who are plausible
+    matches for the mention text.
     """
     candidates = set()
     
-    # 1. Alias/name match (fuzzy)
+    # 1. Alias/name match (fuzzy) from inverted index
     candidates.update(
         query_entities_by_alias(user_id, query.mention_text, threshold=0.7)
     )
     
-    # 2. Attendee email matches (if "Sam" is an attendee with email)
-    # This surfaces the right entity even if the name fuzzy match is weak
-    for email in query.attendee_emails:
-        entity = get_entity_by_email(user_id, email)
-        if entity:
-            candidates.add(entity)
+    # 2. Attendee-based candidates (FILTERED - not all attendees)
+    # Only include attendees whose name fuzzy-matches the mention OR who are the speaker
+    for attendee in query.meeting_attendees:  # list[AttendeeInfo]
+        # Skip if no email (can't create/lookup entity)
+        if not attendee.email:
+            continue
+        
+        # Check if attendee name matches mention (lower threshold than hard-link)
+        name_match = fuzzy_match(query.mention_text, attendee.name)
+        
+        # Check if attendee is the speaker (from diarization)
+        is_speaker = (
+            query.speaker_email and 
+            attendee.email.lower() == query.speaker_email.lower()
+        )
+        
+        if name_match >= CANDIDATE_ATTENDEE_THRESHOLD or is_speaker:
+            entity = get_entity_by_email(user_id, attendee.email)
+            if entity:
+                candidates.add(entity)
     
     # 3. Recent/proximal entities in same meetings (temporal clustering)
+    # Only add if name also has some similarity to mention
     recent_entities = get_entities_in_recent_meetings(user_id, query.meeting_id, days=30)
     for entity in recent_entities:
         if fuzzy_match(query.mention_text, entity.aliases) > 0.5:
@@ -571,6 +756,7 @@ The transcript is provided as segments with IDs. For each entity, provide a JSON
 RULES:
 - Only extract entities you can ground with a direct quote from a specific segment
 - Use the segment_id provided in the transcript
+- Keep quotes SHORT (1-2 sentences, under 200 characters) - just enough to contain the mention
 - Do not infer relationships or roles not explicitly stated
 - If no role is explicitly stated, set role_hint to null
 - If no organization is mentioned in context, set org_hint to null
@@ -621,8 +807,10 @@ def normalize_text(text: str) -> str:
 ```
 
 **Storage:** Segments are stored on the Meeting record or in a separate `kairos-transcripts` table:
-- PK: `MEETING#<meeting_id>`
+- PK: `USER#<user_id>#MEETING#<meeting_id>` (user-partitioned for tenant isolation)
 - SK: `SEGMENT#<segment_id>`
+
+**Note:** All tables use `USER#<user_id>` prefix to ensure tenant isolation. Meeting IDs from external calendars (Google, etc.) are not globally unique, so user partitioning is required.
 
 ---
 
@@ -636,9 +824,69 @@ class VerificationResult:
     errors: list[str]  # blocking errors
     warnings: list[str]  # non-blocking (fields stripped)
 
+MAX_QUOTE_LENGTH = 200  # Encourage short quotes for reliable verification
+
+def token_set_similarity(text_a: str, text_b: str) -> float:
+    """
+    Token-based similarity for text containment verification.
+    Better than Jaro-Winkler for longer strings.
+    
+    Returns: float 0.0 - 1.0 (Jaccard similarity over word tokens)
+    """
+    tokens_a = set(text_a.lower().split())
+    tokens_b = set(text_b.lower().split())
+    if not tokens_a or not tokens_b:
+        return 0.0
+    intersection = tokens_a & tokens_b
+    union = tokens_a | tokens_b
+    return len(intersection) / len(union)
+
+def check_quote_in_segments(
+    quote_norm: str,
+    primary_segment: TranscriptSegment,
+    segments: dict[str, TranscriptSegment],
+    segment_ids_ordered: list[str]  # ordered list for adjacency lookup
+) -> tuple[bool, str | None]:
+    """
+    Check if quote appears in segment. If not, check adjacent segments.
+    Returns (found, matched_segment_id)
+    """
+    # Try primary segment first (exact substring)
+    if quote_norm in primary_segment.text_normalized:
+        return True, primary_segment.segment_id
+    
+    # Try token-set similarity on primary (handles minor variations)
+    if token_set_similarity(quote_norm, primary_segment.text_normalized) >= 0.85:
+        return True, primary_segment.segment_id
+    
+    # Quote might span segments - check adjacent segments
+    try:
+        idx = segment_ids_ordered.index(primary_segment.segment_id)
+    except ValueError:
+        return False, None
+    
+    # Check previous segment
+    if idx > 0:
+        prev_seg = segments.get(segment_ids_ordered[idx - 1])
+        if prev_seg:
+            combined = prev_seg.text_normalized + " " + primary_segment.text_normalized
+            if quote_norm in combined or token_set_similarity(quote_norm, combined) >= 0.85:
+                return True, primary_segment.segment_id  # Keep original segment_id
+    
+    # Check next segment
+    if idx < len(segment_ids_ordered) - 1:
+        next_seg = segments.get(segment_ids_ordered[idx + 1])
+        if next_seg:
+            combined = primary_segment.text_normalized + " " + next_seg.text_normalized
+            if quote_norm in combined or token_set_similarity(quote_norm, combined) >= 0.85:
+                return True, primary_segment.segment_id
+    
+    return False, None
+
 def verify_extraction(
     extraction: MentionExtraction, 
-    segments: dict[str, TranscriptSegment]  # segment_id → segment
+    segments: dict[str, TranscriptSegment],  # segment_id → segment
+    segment_ids_ordered: list[str]  # for adjacency checks
 ) -> VerificationResult:
     """
     Deterministic verification that extraction is grounded.
@@ -653,19 +901,21 @@ def verify_extraction(
     # Make a copy to clean
     cleaned = extraction.copy()
     
+    # 0. Quote length check (warning only)
+    if len(extraction.quote) > MAX_QUOTE_LENGTH:
+        warnings.append(f"quote_too_long ({len(extraction.quote)} chars)")
+    
     # 1. Segment must exist (BLOCKING)
     segment = segments.get(extraction.segment_id)
     if not segment:
         errors.append("segment_not_found")
         return VerificationResult(is_valid=False, cleaned_extraction=None, errors=errors, warnings=warnings)
     
-    # 2. Quote must appear in segment (BLOCKING)
+    # 2. Quote must appear in segment or adjacent segments (BLOCKING)
     quote_norm = normalize_text(extraction.quote)
-    if quote_norm not in segment.text_normalized:
-        # Fallback: check if quote appears with high fuzzy similarity
-        similarity = fuzzy_match(quote_norm, segment.text_normalized)
-        if similarity < 0.90:
-            errors.append("quote_not_in_segment")
+    found, _ = check_quote_in_segments(quote_norm, segment, segments, segment_ids_ordered)
+    if not found:
+        errors.append("quote_not_in_segment")
     
     # 3. Mention text must appear in quote (BLOCKING)
     mention_norm = normalize_text(extraction.mention_text)
@@ -773,9 +1023,10 @@ def should_create_edge(entailment: EntailmentResult) -> bool:
 | Verification Type | When Applied | If Failed |
 |------------------|--------------|-----------|
 | Deterministic (segment exists) | All extractions | **BLOCKING** - mention rejected |
-| Deterministic (quote in segment, normalized) | All extractions | **BLOCKING** - mention rejected |
+| Deterministic (quote in segment + adjacent, token-set similarity) | All extractions | **BLOCKING** - mention rejected |
 | Deterministic (mention in quote, normalized) | All extractions | **BLOCKING** - mention rejected |
 | Deterministic (timestamps within segment) | All extractions | **BLOCKING** - mention rejected |
+| Quote length check (≤200 chars) | All extractions | **WARNING** - logged, mention kept |
 | Deterministic (role_hint in quote, normalized) | Extractions with role_hint | **NON-BLOCKING** - role_hint stripped, mention kept |
 | Deterministic (org_hint in segment, normalized) | Extractions with org_hint | **NON-BLOCKING** - org_hint stripped, mention kept |
 | LLM Entailment (verdict=SUPPORTED) | WORKS_AT, RELATES_TO, INTRODUCED edges | **BLOCKING** - edge not created |
