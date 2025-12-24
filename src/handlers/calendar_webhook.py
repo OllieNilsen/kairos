@@ -14,7 +14,7 @@ from aws_lambda_powertools import Logger
 try:
     from adapters.google_calendar import (
         GoogleCalendarClient,
-        extract_attendee_names,
+        extract_attendees,
         parse_event_datetime,
     )
     from adapters.meetings_repo import MeetingsRepository
@@ -24,7 +24,7 @@ try:
 except ImportError:
     from src.adapters.google_calendar import (
         GoogleCalendarClient,
-        extract_attendee_names,
+        extract_attendees,
         parse_event_datetime,
     )
     from src.adapters.meetings_repo import MeetingsRepository
@@ -200,7 +200,7 @@ def sync_calendar_events() -> dict[str, int]:
             location=location,
             start_time=start_dt,
             end_time=end_dt,
-            attendees=extract_attendee_names(event),
+            attendees=extract_attendees(event),
             status=existing.status if existing else "pending",
             google_etag=event.get("etag"),
         )

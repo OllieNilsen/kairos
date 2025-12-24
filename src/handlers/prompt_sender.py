@@ -259,7 +259,7 @@ def build_multi_meeting_prompt(meetings: list[Meeting]) -> str:
     for i, meeting in enumerate(meetings, 1):
         ctx = f"{i}. {meeting.title}"
         if meeting.attendees:
-            ctx += f" (with {', '.join(meeting.attendees[:3])})"
+            ctx += f" (with {', '.join(meeting.attendee_names[:3])})"
         ctx += f" - {meeting.duration_minutes()} min"
         meeting_contexts.append(ctx)
 
@@ -296,10 +296,10 @@ def _collect_unique_attendees(meetings: list[Meeting], limit: int = 10) -> list[
     seen: set[str] = set()
     result: list[str] = []
     for meeting in meetings:
-        for attendee in meeting.attendees:
-            if attendee not in seen:
-                seen.add(attendee)
-                result.append(attendee)
+        for name in meeting.attendee_names:
+            if name not in seen:
+                seen.add(name)
+                result.append(name)
                 if len(result) >= limit:
                     return result
     return result

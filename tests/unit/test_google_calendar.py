@@ -8,8 +8,10 @@ import pytest
 from src.adapters.google_calendar import (
     GoogleCalendarClient,
     extract_attendee_names,
+    extract_attendees,
     parse_event_datetime,
 )
+from src.core.models import AttendeeInfo
 
 
 class TestGoogleCalendarClient:
@@ -180,6 +182,75 @@ class TestExtractAttendeeNames:
         names = extract_attendee_names(event)
 
         assert names == []
+
+
+class TestExtractAttendees:
+    """Tests for extract_attendees helper (returns AttendeeInfo)."""
+
+    def test_extracts_full_info(self):
+        """Should extract name and email into AttendeeInfo."""
+        event = {
+            "attendees": [
+                {"displayName": "Alice Smith", "email": "alice@example.com"},
+                {"displayName": "Bob Jones", "email": "bob@example.com"},
+            ]
+        }
+
+        attendees = extract_attendees(event)
+
+        assert len(attendees) == 2
+        assert attendees[0] == AttendeeInfo(name="Alice Smith", email="alice@example.com")
+        assert attendees[1] == AttendeeInfo(name="Bob Jones", email="bob@example.com")
+
+    def test_falls_back_to_email_for_name(self):
+        """Should use email as name when displayName is missing."""
+        event = {
+            "attendees": [
+                {"email": "alice@example.com"},
+            ]
+        }
+
+        attendees = extract_attendees(event)
+
+        assert len(attendees) == 1
+        assert attendees[0].name == "alice@example.com"
+        assert attendees[0].email == "alice@example.com"
+
+    def test_excludes_self(self):
+        """Should exclude attendees marked as self."""
+        event = {
+            "attendees": [
+                {"displayName": "Me", "email": "me@example.com", "self": True},
+                {"displayName": "Other Person", "email": "other@example.com"},
+            ]
+        }
+
+        attendees = extract_attendees(event)
+
+        assert len(attendees) == 1
+        assert attendees[0].name == "Other Person"
+
+    def test_empty_attendees(self):
+        """Should return empty list when no attendees."""
+        event = {}
+
+        attendees = extract_attendees(event)
+
+        assert attendees == []
+
+    def test_handles_no_email(self):
+        """Should handle attendees without email (rare but possible)."""
+        event = {
+            "attendees": [
+                {"displayName": "Mystery Person"},
+            ]
+        }
+
+        attendees = extract_attendees(event)
+
+        assert len(attendees) == 1
+        assert attendees[0].name == "Mystery Person"
+        assert attendees[0].email is None
 
 
 class TestGoogleCalendarClientEventMethods:

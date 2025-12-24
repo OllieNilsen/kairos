@@ -7,7 +7,7 @@ from enum import Enum
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # === Slice 3: Knowledge Graph Enums ===
@@ -123,10 +123,21 @@ class TriggerResponse(BaseModel):
 
 
 class TranscriptTurn(BaseModel):
-    """A single turn in the conversation transcript."""
+    """A single turn in the conversation transcript from Bland AI.
 
-    speaker: Literal["assistant", "user"]
+    Bland sends transcripts with timestamps and unique IDs.
+    The 'user' field indicates the speaker (we alias it to 'speaker' for clarity).
+    """
+
+    id: int  # Unique segment ID from Bland
+    user: Literal["assistant", "user"]  # Bland uses 'user' for speaker role
     text: str
+    created_at: str  # ISO timestamp when this segment was spoken
+
+    @property
+    def speaker(self) -> Literal["assistant", "user"]:
+        """Alias for 'user' field for backward compatibility."""
+        return self.user
 
 
 class BlandWebhookPayload(BaseModel):
@@ -139,21 +150,43 @@ class BlandWebhookPayload(BaseModel):
     status: str  # Bland sends various statuses, don't restrict
     to: str = ""
     from_number: str = Field(default="", alias="from")
-    started_at: str | None = None
-    ended_at: str | None = None
+    started_at: str | None = Field(default=None, alias="started_at")
+    end_at: str | None = None  # Bland uses 'end_at' not 'ended_at'
     call_length: float | None = None  # Bland uses call_length (in minutes)
-    transcript: list[TranscriptTurn] = Field(default_factory=list)
+    transcripts: list[TranscriptTurn] = Field(default_factory=list)  # Bland uses 'transcripts'
     concatenated_transcript: str = ""
     variables: dict[str, Any] = Field(default_factory=dict)  # Can be nested
+    answered_by: str | None = None  # e.g., "voicemail", "human"
+    corrected_duration: str | None = None  # Duration in seconds as string
 
     model_config = {"populate_by_name": True, "extra": "ignore"}
+
+    @property
+    def transcript(self) -> list[TranscriptTurn]:
+        """Alias for backward compatibility."""
+        return self.transcripts
 
 
 # === Meeting Models (Slice 2) ===
 
 
+class AttendeeInfo(BaseModel):
+    """Attendee information from calendar event.
+
+    Used for deterministic entity resolution via email.
+    """
+
+    name: str
+    email: str | None = None  # None if email not available
+
+
 class Meeting(BaseModel):
-    """A calendar meeting synced from Google Calendar."""
+    """A calendar meeting synced from Google Calendar.
+
+    Note: attendees field supports both old format (list[str] of emails) and
+    new format (list[AttendeeInfo] with name + email). A validator normalizes
+    old format to new format on load.
+    """
 
     user_id: str
     meeting_id: str  # Google Calendar event ID
@@ -162,10 +195,42 @@ class Meeting(BaseModel):
     location: str | None = None  # Meeting location or video link
     start_time: datetime
     end_time: datetime
-    attendees: list[str] = Field(default_factory=list)
+    attendees: list[AttendeeInfo] = Field(default_factory=list)
+    attendee_entity_ids: list[str] = Field(default_factory=list)  # Linked entity IDs (Slice 3)
     status: Literal["pending", "debriefed", "skipped"] = "pending"
     google_etag: str | None = None  # For sync conflict detection
     created_at: datetime = Field(default_factory=datetime.now)
+
+    @field_validator("attendees", mode="before")
+    @classmethod
+    def normalize_attendees(cls, v: Any) -> list[dict[str, Any]]:
+        """Convert old format (list of emails) to new format (AttendeeInfo)."""
+        if not v:
+            return []
+        result = []
+        for item in v:
+            if isinstance(item, str):
+                # Old format: just an email string - use email as name too
+                result.append({"name": item, "email": item})
+            elif isinstance(item, dict):
+                # Dict from DynamoDB/JSON - pass through
+                result.append(item)
+            elif hasattr(item, "model_dump"):
+                # Already an AttendeeInfo
+                result.append(item.model_dump())
+            else:
+                continue
+        return result
+
+    @property
+    def attendee_emails(self) -> list[str]:
+        """Get list of attendee emails for backward compatibility."""
+        return [a.email for a in self.attendees if a.email]
+
+    @property
+    def attendee_names(self) -> list[str]:
+        """Get list of attendee display names."""
+        return [a.name for a in self.attendees]
 
     def duration_minutes(self) -> int:
         """Calculate meeting duration in minutes."""
@@ -177,7 +242,7 @@ class Meeting(BaseModel):
         return EventContext(
             event_type="meeting_debrief",
             subject=self.title,
-            participants=self.attendees,
+            participants=self.attendee_names,  # Use names for context
             duration_minutes=self.duration_minutes(),
         )
 
@@ -189,29 +254,12 @@ class Meeting(BaseModel):
         if self.location:
             parts.append(f"Location: {self.location}")
         if self.attendees:
-            # Handle both old format (list[str]) and new format (list[AttendeeInfo])
-            attendee_names = []
-            for a in self.attendees:
-                if isinstance(a, str):
-                    attendee_names.append(a)
-                elif hasattr(a, "name"):
-                    attendee_names.append(a.name)
-            parts.append(f"Attendees: {', '.join(attendee_names)}")
+            parts.append(f"Attendees: {', '.join(self.attendee_names)}")
         parts.append(f"Duration: {self.duration_minutes()} minutes")
         return "\n".join(parts)
 
 
 # === Slice 3: Knowledge Graph Models ===
-
-
-class AttendeeInfo(BaseModel):
-    """Attendee information from calendar event.
-
-    Used for deterministic entity resolution via email.
-    """
-
-    name: str
-    email: str | None = None  # None if email not available
 
 
 class TranscriptSegment(BaseModel):

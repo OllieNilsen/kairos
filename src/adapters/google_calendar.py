@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
+
+if TYPE_CHECKING:
+    from src.core.models import AttendeeInfo
 
 # Google API endpoints
 TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -324,6 +327,9 @@ def extract_attendee_names(event: dict[str, Any]) -> list[str]:
 
     Returns:
         List of attendee names (excluding the calendar owner)
+
+    Note:
+        Deprecated in favor of extract_attendees() which returns full AttendeeInfo.
     """
     attendees = event.get("attendees", [])
     names = []
@@ -338,3 +344,32 @@ def extract_attendee_names(event: dict[str, Any]) -> list[str]:
         names.append(name)
 
     return names
+
+
+def extract_attendees(event: dict[str, Any]) -> list["AttendeeInfo"]:
+    """Extract full attendee information from a calendar event.
+
+    Args:
+        event: Google Calendar event dictionary
+
+    Returns:
+        List of AttendeeInfo objects (excluding the calendar owner)
+    """
+    # Import here to avoid circular dependency
+    from src.core.models import AttendeeInfo
+
+    attendees = event.get("attendees", [])
+    result = []
+
+    for attendee in attendees:
+        # Skip the calendar owner (self)
+        if attendee.get("self"):
+            continue
+
+        # Get display name and email
+        email = attendee.get("email")
+        name = attendee.get("displayName") or email or "Unknown"
+
+        result.append(AttendeeInfo(name=name, email=email))
+
+    return result

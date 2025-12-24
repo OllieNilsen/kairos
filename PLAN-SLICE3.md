@@ -1234,20 +1234,42 @@ def should_create_edge(entailment: EntailmentResult) -> bool:
 
 ### Phase 3A: Data Model and Attendee Enrichment
 
+#### 3A.1 Core Models (DONE)
+- [x] Create `EntityType`, `EntityStatus`, `ResolutionState`, `EdgeType` enums
+- [x] Create `AttendeeInfo` model: `{name: str, email: str | None}`
+- [x] Create `TranscriptSegment` model: `{segment_id, t0, t1, speaker, text, text_normalized}`
+- [x] Create `Entity`, `Mention`, `Edge`, `MentionEvidence`, `EdgeEvidence` models
+- [x] Create `MentionExtraction`, `VerificationResult`, `EntailmentResult` models
+- [x] Create `CandidateQuery`, `CandidateScore` models
+- [x] Update `TranscriptTurn` in `BlandWebhookPayload` with Bland's actual fields (`id`, `user`, `text`, `created_at`)
+
+#### 3A.2 Meeting & Attendee Updates (DONE)
+- [x] Update `Meeting` model to use `attendees: list[AttendeeInfo]` with backward compat validator
+- [x] Add `attendee_entity_ids: list[str]` to Meeting model
+- [x] Add `attendee_emails` and `attendee_names` properties to Meeting
+- [x] Create `extract_attendees()` function returning `list[AttendeeInfo]`
+- [x] Update `calendar_webhook.py` to use `extract_attendees()`
+
+#### 3A.3 Meetings Repository Updates (IN PROGRESS)
+- [ ] Update `meetings_repo.py` to serialize/deserialize `AttendeeInfo` objects
+
+#### 3A.4 Transcript Storage (TODO)
+- [ ] Create `kairos-transcripts` DynamoDB table (PK: `USER#<user_id>#MEETING#<meeting_id>`, SK: `SEGMENT#<segment_id>`)
+- [ ] Create `TranscriptsRepository` adapter with:
+  - `save_transcript(user_id, meeting_id, call_id, segments: list[TranscriptSegment])`
+  - `get_transcript(user_id, meeting_id) -> list[TranscriptSegment]`
+  - `get_segment(user_id, meeting_id, segment_id) -> TranscriptSegment | None`
+- [ ] Create `convert_bland_transcript(transcripts: list[TranscriptTurn]) -> list[TranscriptSegment]` helper
+- [ ] Update `webhook.py` to store transcript after successful call
+- [ ] Create `normalize_text()` function for verification comparisons
+
+#### 3A.5 CDK Resources (TODO)
 - [ ] Create `kairos-entities` DynamoDB table with GSI1 (by type), GSI2 (by email)
 - [ ] Create `kairos-mentions` DynamoDB table with GSI1 (by entity), GSI2 (by state)
 - [ ] Create `kairos-edges` DynamoDB table (dual-write pattern)
 - [ ] Create `kairos-entity-aliases` inverted index table
-- [ ] Create `kairos-entity-evidence` overflow table
-- [ ] Add CDK resources for all tables
-- [ ] Create `TranscriptSegment` model: `{segment_id, t0, t1, speaker, text, text_normalized}`
-- [ ] Create `normalize_text()` function for verification comparisons
-- [ ] Store transcript as segments on Meeting or in `kairos-transcripts` table
-- [ ] Create `AttendeeInfo` model: `{name: str, email: str | None}`
-- [ ] Update `Meeting` model to use `attendees: list[AttendeeInfo]`
-- [ ] Add `attendee_entity_ids: list[str]` to Meeting model
-- [ ] Update `extract_attendee_names` → `extract_attendees` returning full info
-- [ ] Update `meetings_repo.py` to store/retrieve attendee objects
+- [ ] Create `kairos-transcripts` DynamoDB table
+- [ ] Add environment variables to webhook Lambda for new tables
 
 ### Phase 3B: Entity Repository
 

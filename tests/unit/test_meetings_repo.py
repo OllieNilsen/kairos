@@ -254,5 +254,7 @@ class TestMeetingsRepository:
         assert meeting.title == "Test Meeting"
         assert meeting.description == "A description"
         assert meeting.location == "Room 1"
-        assert meeting.attendees == ["Alice", "Bob"]
+        # Attendees are now AttendeeInfo objects (old string format converted)
+        assert meeting.attendee_emails == ["Alice", "Bob"]
+        assert meeting.attendee_names == ["Alice", "Bob"]
         assert meeting.google_etag == "etag-123"

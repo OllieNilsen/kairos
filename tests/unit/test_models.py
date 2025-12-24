@@ -117,15 +117,21 @@ class TestBlandWebhookPayload:
             to="+15551234567",
             **{"from": "+18005551234"},  # 'from' is a reserved keyword
             call_length=3.5,
-            transcript=[
-                TranscriptTurn(speaker="assistant", text="Hello"),
-                TranscriptTurn(speaker="user", text="Hi there"),
+            transcripts=[
+                TranscriptTurn(id=1, user="assistant", text="Hello", created_at="2025-01-01T10:00:00Z"),
+                TranscriptTurn(id=2, user="user", text="Hi there", created_at="2025-01-01T10:00:05Z"),
             ],
             concatenated_transcript="Assistant: Hello\nUser: Hi there",
         )
         assert payload.call_id == "abc-123"
         assert payload.from_number == "+18005551234"
+        assert len(payload.transcripts) == 2
+        # Backward compatibility alias
         assert len(payload.transcript) == 2
+        # Speaker alias on TranscriptTurn
+        assert payload.transcripts[0].speaker == "assistant"
+        assert payload.transcripts[0].id == 1
+        assert payload.transcripts[0].created_at == "2025-01-01T10:00:00Z"
 
     def test_from_alias(self):
         """'from' field should be accessible via from_number."""
