@@ -14,29 +14,43 @@ from pydantic import ValidationError
 try:
     from adapters.anthropic_client import AnthropicSummarizer
     from adapters.dynamodb import CallDeduplicator
+    from adapters.edges_repo import EdgesRepository
+    from adapters.entities_repo import EntitiesRepository
     from adapters.google_calendar import GoogleCalendarClient
     from adapters.idempotency import CallRetryDedup
+    from adapters.llm import AnthropicAdapter
     from adapters.meetings_repo import MeetingsRepository
+    from adapters.mentions_repo import MentionsRepository
     from adapters.scheduler import SchedulerClient, make_retry_schedule_name
     from adapters.ses import SESPublisher
     from adapters.ssm import get_parameter
+    from adapters.transcripts_repo import TranscriptsRepository
     from adapters.user_state import UserStateRepository
     from adapters.webhook_verify import verify_bland_signature
-    from core.models import BlandWebhookPayload, EventContext
+    from core.extraction import EntityExtractor
+    from core.models import BlandWebhookPayload, EventContext, convert_bland_transcript
     from core.prompts import build_summarization_prompt
+    from core.resolution import EntityResolutionService
 except ImportError:
     from src.adapters.anthropic_client import AnthropicSummarizer
     from src.adapters.dynamodb import CallDeduplicator
+    from src.adapters.edges_repo import EdgesRepository
+    from src.adapters.entities_repo import EntitiesRepository
     from src.adapters.google_calendar import GoogleCalendarClient
     from src.adapters.idempotency import CallRetryDedup
+    from src.adapters.llm import AnthropicAdapter
     from src.adapters.meetings_repo import MeetingsRepository
+    from src.adapters.mentions_repo import MentionsRepository
     from src.adapters.scheduler import SchedulerClient, make_retry_schedule_name
     from src.adapters.ses import SESPublisher
     from src.adapters.ssm import get_parameter
+    from src.adapters.transcripts_repo import TranscriptsRepository
     from src.adapters.user_state import UserStateRepository
     from src.adapters.webhook_verify import verify_bland_signature
-    from src.core.models import BlandWebhookPayload, EventContext
+    from src.core.extraction import EntityExtractor
+    from src.core.models import BlandWebhookPayload, EventContext, convert_bland_transcript
     from src.core.prompts import build_summarization_prompt
+    from src.core.resolution import EntityResolutionService
 
 if TYPE_CHECKING:
     from aws_lambda_powertools.utilities.typing import LambdaContext
@@ -83,6 +97,13 @@ _retry_dedup: CallRetryDedup | None = None
 _scheduler: SchedulerClient | None = None
 _meetings_repo: MeetingsRepository | None = None
 _calendar: GoogleCalendarClient | None = None
+_transcripts_repo: TranscriptsRepository | None = None
+_entities_repo: EntitiesRepository | None = None
+_mentions_repo: MentionsRepository | None = None
+_edges_repo: EdgesRepository | None = None
+_resolution_service: EntityResolutionService | None = None
+_llm_client: AnthropicAdapter | None = None
+_entity_extractor: EntityExtractor | None = None
 
 
 def get_anthropic() -> AnthropicSummarizer:
@@ -166,6 +187,80 @@ def get_calendar() -> GoogleCalendarClient | None:
             logger.warning("Could not initialize Google Calendar client", extra={"error": str(e)})
             return None
     return _calendar
+
+
+def get_transcripts_repo() -> TranscriptsRepository | None:
+    global _transcripts_repo
+    table_name = os.environ.get("TRANSCRIPTS_TABLE")
+    if not table_name:
+        return None
+    if _transcripts_repo is None:
+        _transcripts_repo = TranscriptsRepository(table_name)
+    return _transcripts_repo
+
+
+def get_entities_repo() -> EntitiesRepository | None:
+    global _entities_repo
+    entities_table = os.environ.get("ENTITIES_TABLE")
+    aliases_table = os.environ.get("ENTITY_ALIASES_TABLE")
+    if not entities_table or not aliases_table:
+        return None
+    if _entities_repo is None:
+        _entities_repo = EntitiesRepository(entities_table, aliases_table)
+    return _entities_repo
+
+
+def get_mentions_repo() -> MentionsRepository | None:
+    global _mentions_repo
+    table_name = os.environ.get("MENTIONS_TABLE")
+    if not table_name:
+        return None
+    if _mentions_repo is None:
+        _mentions_repo = MentionsRepository(table_name)
+    return _mentions_repo
+
+
+def get_edges_repo() -> EdgesRepository | None:
+    global _edges_repo
+    table_name = os.environ.get("EDGES_TABLE")
+    if not table_name:
+        return None
+    if _edges_repo is None:
+        _edges_repo = EdgesRepository(table_name)
+    return _edges_repo
+
+
+def get_llm_client() -> AnthropicAdapter:
+    global _llm_client
+    if _llm_client is None:
+        ssm_param_name = os.environ["SSM_ANTHROPIC_API_KEY"]
+        api_key = get_parameter(ssm_param_name)
+        _llm_client = AnthropicAdapter(api_key)
+    return _llm_client
+
+
+def get_entity_extractor() -> EntityExtractor:
+    global _entity_extractor
+    if _entity_extractor is None:
+        llm = get_llm_client()
+        _entity_extractor = EntityExtractor(llm)
+    return _entity_extractor
+
+
+def get_resolution_service() -> EntityResolutionService | None:
+    global _resolution_service
+    if _resolution_service is None:
+        extractor = get_entity_extractor()
+        transcripts = get_transcripts_repo()
+        entities = get_entities_repo()
+        mentions = get_mentions_repo()
+
+        if not (transcripts and entities and mentions):
+            logger.warning("Missing dependencies for ResolutionService")
+            return None
+
+        _resolution_service = EntityResolutionService(extractor, entities, mentions, transcripts)
+    return _resolution_service
 
 
 @logger.inject_lambda_context
@@ -444,6 +539,29 @@ def _handle_successful_call(
                     "Could not delete debrief event",
                     extra={"event_id": user_state.debrief_event_id, "error": str(e)},
                 )
+
+    # === Slice 3: Transcripts & Knowledge Graph ===
+    # 1. Save transcript segments
+    transcripts_repo = get_transcripts_repo()
+    if transcripts_repo:
+        try:
+            segments = convert_bland_transcript(payload.transcripts)
+            # Use call_id as meeting_id for transcript storage
+            target_meeting_id = payload.call_id
+
+            transcripts_repo.save_transcript(user_id, target_meeting_id, segments)
+            logger.info("Saved transcript segments", extra={"count": len(segments)})
+
+            # 2. Trigger Entity Resolution
+            resolution_service = get_resolution_service()
+            if resolution_service:
+                resolution_service.process_meeting(user_id, target_meeting_id)
+                logger.info("Processed meeting for entity resolution")
+            else:
+                logger.warning("Resolution service not available")
+
+        except Exception as e:
+            logger.error("Failed to process knowledge graph", extra={"error": str(e)})
 
     # Extract event context from variables (passed through from trigger)
     event_context = _extract_event_context(payload)

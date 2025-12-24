@@ -343,3 +343,55 @@ class TestHandleSuccessfulCall:
 
         mock_calendar.delete_event.assert_not_called()
         assert result["statusCode"] == 200
+
+    def test_triggers_knowledge_graph_processing(self) -> None:
+        """Should trigger transcript saving and entity resolution."""
+        from src.core.models import TranscriptTurn
+        from src.handlers.webhook import _handle_successful_call
+
+        payload = MagicMock()
+        payload.variables = {}
+        payload.call_id = "call-123"
+        payload.concatenated_transcript = "Test transcript"
+        # Mock transcripts from Bland
+        transcript_turn = TranscriptTurn(
+            id="1", text="Hello", user="user", time="0.0", created_at="2025-01-01T12:00:00Z"
+        )
+        payload.transcripts = [transcript_turn]
+
+        # Mocks
+        mock_transcripts_repo = MagicMock()
+        mock_resolution_service = MagicMock()
+
+        # Other mocks needed for successful flow
+        mock_user_repo = MagicMock()
+        mock_user_repo.get_user_state.return_value = MagicMock(debrief_event_id=None)
+        mock_anthropic = MagicMock()
+        mock_anthropic.summarize.return_value = "Summary"
+        mock_ses = MagicMock()
+        mock_ses.send_email.return_value = "msg-123"
+
+        with (
+            patch("src.handlers.webhook.get_user_repo", return_value=mock_user_repo),
+            patch("src.handlers.webhook.get_meetings_repo", return_value=None),
+            patch("src.handlers.webhook.get_calendar", return_value=None),
+            patch("src.handlers.webhook.get_anthropic", return_value=mock_anthropic),
+            patch("src.handlers.webhook.get_ses", return_value=mock_ses),
+            patch("src.handlers.webhook.get_transcripts_repo", return_value=mock_transcripts_repo),
+            patch(
+                "src.handlers.webhook.get_resolution_service", return_value=mock_resolution_service
+            ),
+            patch.dict("os.environ", {"RECIPIENT_EMAIL": "test@example.com"}),
+        ):
+            result = _handle_successful_call(payload, "user-001")
+
+        # Verify functionality
+        mock_transcripts_repo.save_transcript.assert_called_once()
+        # Verify arguments: user_id, meeting_id (call_id), segments
+        args = mock_transcripts_repo.save_transcript.call_args
+        assert args[0][0] == "user-001"
+        assert args[0][1] == "call-123"
+
+        mock_resolution_service.process_meeting.assert_called_once_with("user-001", "call-123")
+
+        assert result["statusCode"] == 200

@@ -651,9 +651,19 @@ class KairosStack(Stack):
         webhook_fn.add_environment("MEETINGS_TABLE", meetings_table.table_name)
         meetings_table.grant_read_write_data(webhook_fn)
 
-        # Add transcripts table access for storing transcript segments (Slice 3)
         webhook_fn.add_environment("TRANSCRIPTS_TABLE", transcripts_table.table_name)
         transcripts_table.grant_read_write_data(webhook_fn)
+
+        # Add Knowledge Graph tables access (Slice 3)
+        webhook_fn.add_environment("ENTITIES_TABLE", entities_table.table_name)
+        webhook_fn.add_environment("MENTIONS_TABLE", mentions_table.table_name)
+        webhook_fn.add_environment("EDGES_TABLE", edges_table.table_name)
+        webhook_fn.add_environment("ENTITY_ALIASES_TABLE", entity_aliases_table.table_name)
+
+        entities_table.grant_read_write_data(webhook_fn)
+        mentions_table.grant_read_write_data(webhook_fn)
+        edges_table.grant_read_write_data(webhook_fn)
+        entity_aliases_table.grant_read_write_data(webhook_fn)
 
 
         # Add Google Calendar SSM access for deleting debrief event
