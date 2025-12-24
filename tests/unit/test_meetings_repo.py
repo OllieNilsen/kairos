@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.adapters.meetings_repo import MeetingsRepository
-from src.core.models import Meeting
+from src.core.models import AttendeeInfo, Meeting
 
 
 class TestMeetingsRepository:
@@ -258,3 +258,79 @@ class TestMeetingsRepository:
         assert meeting.attendee_emails == ["Alice", "Bob"]
         assert meeting.attendee_names == ["Alice", "Bob"]
         assert meeting.google_etag == "etag-123"
+
+    def test_save_meeting_serializes_attendee_info_objects(
+        self, repo: MeetingsRepository, mock_dynamodb: MagicMock
+    ) -> None:
+        """Should serialize AttendeeInfo objects to dicts when saving."""
+        meeting = Meeting(
+            user_id="user-001",
+            meeting_id="meeting-789",
+            title="Team Sync",
+            start_time=datetime(2024, 1, 15, 10, 0, tzinfo=UTC),
+            end_time=datetime(2024, 1, 15, 10, 30, tzinfo=UTC),
+            attendees=[
+                AttendeeInfo(name="Alice Smith", email="alice@example.com"),
+                AttendeeInfo(name="Bob Jones", email="bob@example.com"),
+            ],
+            status="pending",
+            created_at=datetime(2024, 1, 14, 12, 0, tzinfo=UTC),
+        )
+
+        repo.save_meeting(meeting)
+
+        item = mock_dynamodb.put_item.call_args[1]["Item"]
+        # Attendees should be serialized as list of dicts, not AttendeeInfo objects
+        assert item["attendees"] == [
+            {"name": "Alice Smith", "email": "alice@example.com"},
+            {"name": "Bob Jones", "email": "bob@example.com"},
+        ]
+
+    def test_save_meeting_handles_attendee_without_email(
+        self, repo: MeetingsRepository, mock_dynamodb: MagicMock
+    ) -> None:
+        """Should handle AttendeeInfo with None email when saving."""
+        meeting = Meeting(
+            user_id="user-001",
+            meeting_id="meeting-790",
+            title="External Call",
+            start_time=datetime(2024, 1, 15, 11, 0, tzinfo=UTC),
+            end_time=datetime(2024, 1, 15, 11, 30, tzinfo=UTC),
+            attendees=[
+                AttendeeInfo(name="External Person", email=None),
+            ],
+            status="pending",
+            created_at=datetime(2024, 1, 14, 12, 0, tzinfo=UTC),
+        )
+
+        repo.save_meeting(meeting)
+
+        item = mock_dynamodb.put_item.call_args[1]["Item"]
+        assert item["attendees"] == [{"name": "External Person", "email": None}]
+
+    def test_item_to_meeting_with_attendee_info_dicts(self, repo: MeetingsRepository) -> None:
+        """Should correctly deserialize AttendeeInfo dicts from DynamoDB."""
+        item = {
+            "user_id": "user-001",
+            "meeting_id": "meeting-123",
+            "title": "Test Meeting",
+            "start_time": "2024-01-15T10:00:00+00:00",
+            "end_time": "2024-01-15T10:30:00+00:00",
+            "attendees": [
+                {"name": "Alice Smith", "email": "alice@example.com"},
+                {"name": "Bob Jones", "email": "bob@example.com"},
+            ],
+            "status": "pending",
+            "created_at": "2024-01-14T12:00:00+00:00",
+        }
+
+        meeting = repo._item_to_meeting(item)
+
+        assert len(meeting.attendees) == 2
+        assert meeting.attendees[0].name == "Alice Smith"
+        assert meeting.attendees[0].email == "alice@example.com"
+        assert meeting.attendees[1].name == "Bob Jones"
+        assert meeting.attendees[1].email == "bob@example.com"
+        # Properties should work correctly
+        assert meeting.attendee_emails == ["alice@example.com", "bob@example.com"]
+        assert meeting.attendee_names == ["Alice Smith", "Bob Jones"]

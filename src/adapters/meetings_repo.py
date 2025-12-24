@@ -34,7 +34,7 @@ class MeetingsRepository:
             "title": meeting.title,
             "start_time": meeting.start_time.isoformat(),
             "end_time": meeting.end_time.isoformat(),
-            "attendees": meeting.attendees,
+            "attendees": [a.model_dump() for a in meeting.attendees],
             "status": meeting.status,
             "google_etag": meeting.google_etag,
             "created_at": meeting.created_at.isoformat(),
