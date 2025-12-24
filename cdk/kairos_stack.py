@@ -236,6 +236,127 @@ class KairosStack(Stack):
             time_to_live_attribute="ttl",
         )
 
+        # === DynamoDB Table for Entities (Slice 3) ===
+        entities_table = dynamodb.Table(
+            self,
+            "EntitiesTable",
+            table_name="kairos-entities",
+            partition_key=dynamodb.Attribute(
+                name="pk", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="sk", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,  # For dev - change for prod
+        )
+
+        # GSI1: Query entities by type (e.g., all Person entities for a user)
+        entities_table.add_global_secondary_index(
+            index_name="GSI1",
+            partition_key=dynamodb.Attribute(
+                name="gsi1pk", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="gsi1sk", type=dynamodb.AttributeType.STRING
+            ),
+            projection_type=dynamodb.ProjectionType.ALL,
+        )
+
+        # GSI2: Query entities by email (deterministic lookup for Person entities)
+        entities_table.add_global_secondary_index(
+            index_name="GSI2",
+            partition_key=dynamodb.Attribute(
+                name="gsi2pk", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="gsi2sk", type=dynamodb.AttributeType.STRING
+            ),
+            projection_type=dynamodb.ProjectionType.ALL,
+        )
+
+        # === DynamoDB Table for Mentions (Slice 3) ===
+        mentions_table = dynamodb.Table(
+            self,
+            "MentionsTable",
+            table_name="kairos-mentions",
+            partition_key=dynamodb.Attribute(
+                name="pk", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="sk", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,  # For dev - change for prod
+        )
+
+        # GSI1: Query mentions by linked entity
+        mentions_table.add_global_secondary_index(
+            index_name="GSI1",
+            partition_key=dynamodb.Attribute(
+                name="gsi1pk", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="gsi1sk", type=dynamodb.AttributeType.STRING
+            ),
+            projection_type=dynamodb.ProjectionType.ALL,
+        )
+
+        # GSI2: Query mentions by resolution state (e.g., all ambiguous mentions)
+        mentions_table.add_global_secondary_index(
+            index_name="GSI2",
+            partition_key=dynamodb.Attribute(
+                name="gsi2pk", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="gsi2sk", type=dynamodb.AttributeType.STRING
+            ),
+            projection_type=dynamodb.ProjectionType.ALL,
+        )
+
+        # === DynamoDB Table for Edges (Slice 3) ===
+        # Dual-write pattern: both EDGEOUT and EDGEIN items stored in same table
+        edges_table = dynamodb.Table(
+            self,
+            "EdgesTable",
+            table_name="kairos-edges",
+            partition_key=dynamodb.Attribute(
+                name="pk", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="sk", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,  # For dev - change for prod
+        )
+
+        # === DynamoDB Table for Entity Aliases (Slice 3) ===
+        # Inverted index for fast alias → entity lookups
+        entity_aliases_table = dynamodb.Table(
+            self,
+            "EntityAliasesTable",
+            table_name="kairos-entity-aliases",
+            partition_key=dynamodb.Attribute(
+                name="pk", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="sk", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,  # For dev - change for prod
+        )
+
+        # GSI1: Query aliases by entity (for merge operations)
+        entity_aliases_table.add_global_secondary_index(
+            index_name="GSI1",
+            partition_key=dynamodb.Attribute(
+                name="gsi1pk", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="gsi1sk", type=dynamodb.AttributeType.STRING
+            ),
+            projection_type=dynamodb.ProjectionType.ALL,
+        )
 
         # === Calendar Webhook Lambda ===
         calendar_webhook_fn = lambda_.Function(
