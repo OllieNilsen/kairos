@@ -70,7 +70,7 @@ kairos/
 │   ├── adapters/                 # External service integrations
 │   │   ├── bland.py              # Bland AI client
 │   │   ├── anthropic_client.py   # Anthropic API client
-│   │   ├── sns.py                # SNS publisher (reserved for SMS)
+│   │   ├── sns.py                # SNS publisher (alarm notifications)
 │   │   ├── ses.py                # SES email publisher
 │   │   ├── ssm.py                # SSM Parameter Store (secrets)
 │   │   └── dynamodb.py           # DynamoDB deduplicator
@@ -155,7 +155,7 @@ kairos/
 - [x] Add DynamoDB for call_id deduplication (with TTL auto-cleanup)
 - [x] Add CloudWatch Alarms for Lambda errors → SNS email alerts
 - [x] Add Bland webhook HMAC-SHA256 signature verification
-- [ ] Add SNS SMS as alternative to SES email (pending sandbox exit)
+- [x] SMS notifications via Twilio (Slice 2 - blocked on regulatory approval)
 
 ## Deployed Resources
 
@@ -190,7 +190,7 @@ The SSM adapter (`src/adapters/ssm.py`) uses LRU caching to avoid repeated API c
 | Lambda | < $0.001 |
 | DynamoDB | < $0.001 |
 | SES Email | < $0.001 |
-| SNS SMS | $0.0075 (when enabled) |
+| Twilio SMS | ~$0.01 (when enabled) |
 | **Total** | **~$0.27 per debrief** |
 
 ## Quick Commands
