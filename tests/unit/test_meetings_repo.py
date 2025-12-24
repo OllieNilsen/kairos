@@ -334,3 +334,59 @@ class TestMeetingsRepository:
         # Properties should work correctly
         assert meeting.attendee_emails == ["alice@example.com", "bob@example.com"]
         assert meeting.attendee_names == ["Alice Smith", "Bob Jones"]
+
+    def test_round_trip_attendee_info_serialization(
+        self, repo: MeetingsRepository, mock_dynamodb: MagicMock
+    ) -> None:
+        """Should correctly round-trip AttendeeInfo objects through save and get."""
+        # Create meeting with AttendeeInfo objects
+        original_meeting = Meeting(
+            user_id="user-001",
+            meeting_id="meeting-roundtrip",
+            title="Round Trip Test",
+            start_time=datetime(2024, 1, 15, 10, 0, tzinfo=UTC),
+            end_time=datetime(2024, 1, 15, 10, 30, tzinfo=UTC),
+            attendees=[
+                AttendeeInfo(name="Alice Smith", email="alice@example.com"),
+                AttendeeInfo(name="Bob Jones", email="bob@example.com"),
+                AttendeeInfo(name="Charlie (External)", email=None),
+            ],
+            status="pending",
+            created_at=datetime(2024, 1, 14, 12, 0, tzinfo=UTC),
+        )
+
+        # Save the meeting
+        repo.save_meeting(original_meeting)
+
+        # Capture what was saved to DynamoDB
+        saved_item = mock_dynamodb.put_item.call_args[1]["Item"]
+
+        # Verify attendees were serialized as dicts
+        assert saved_item["attendees"] == [
+            {"name": "Alice Smith", "email": "alice@example.com"},
+            {"name": "Bob Jones", "email": "bob@example.com"},
+            {"name": "Charlie (External)", "email": None},
+        ]
+
+        # Simulate retrieving from DynamoDB
+        mock_dynamodb.get_item.return_value = {"Item": saved_item}
+        retrieved_meeting = repo.get_meeting("user-001", "meeting-roundtrip")
+
+        # Verify the meeting was reconstructed correctly
+        assert retrieved_meeting is not None
+        assert len(retrieved_meeting.attendees) == 3
+        assert isinstance(retrieved_meeting.attendees[0], AttendeeInfo)
+        assert retrieved_meeting.attendees[0].name == "Alice Smith"
+        assert retrieved_meeting.attendees[0].email == "alice@example.com"
+        assert retrieved_meeting.attendees[1].name == "Bob Jones"
+        assert retrieved_meeting.attendees[1].email == "bob@example.com"
+        assert retrieved_meeting.attendees[2].name == "Charlie (External)"
+        assert retrieved_meeting.attendees[2].email is None
+
+        # Verify properties work correctly
+        assert retrieved_meeting.attendee_emails == ["alice@example.com", "bob@example.com"]
+        assert retrieved_meeting.attendee_names == [
+            "Alice Smith",
+            "Bob Jones",
+            "Charlie (External)",
+        ]
