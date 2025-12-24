@@ -467,3 +467,87 @@ class CandidateScore(BaseModel):
     score: float  # 0.0 - 1.0
     confidence: Literal["HIGH", "MEDIUM", "LOW"]
     reasoning: str
+
+
+# === Slice 3: Helper Functions ===
+
+
+def normalize_text(text: str) -> str:
+    """Normalize text for comparison during verification.
+
+    Handles:
+    - Case folding
+    - Punctuation removal (except apostrophes in contractions)
+    - Whitespace collapse
+    - Diarization tag removal (e.g., "[Speaker 1]:")
+
+    Args:
+        text: Raw text to normalize
+
+    Returns:
+        Normalized text for comparison
+    """
+    import re
+
+    text = text.lower()
+    # Remove diarization tags like "[Speaker 1]:" or "[speaker]:"
+    text = re.sub(r"\[speaker\s*\d*\]:?\s*", "", text)
+    # Remove punctuation except apostrophes (for contractions like "don't")
+    text = re.sub(r"[^\w\s']", " ", text)
+    # Collapse whitespace
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def convert_bland_transcript(
+    transcripts: list[TranscriptTurn], call_start_time: str | None = None
+) -> list[TranscriptSegment]:
+    """Convert Bland AI transcript format to TranscriptSegment objects.
+
+    Args:
+        transcripts: List of TranscriptTurn objects from Bland AI
+        call_start_time: ISO timestamp when call started (for calculating t0/t1)
+
+    Returns:
+        List of TranscriptSegment objects with deterministic segment IDs
+    """
+    from contextlib import suppress
+    from datetime import datetime
+
+    segments: list[TranscriptSegment] = []
+
+    # If we have call_start_time, calculate relative timestamps
+    start_dt = None
+    if call_start_time:
+        with suppress(ValueError, AttributeError):
+            start_dt = datetime.fromisoformat(call_start_time.replace("Z", "+00:00"))
+
+    for turn in transcripts:
+        # Generate deterministic segment ID from Bland's ID
+        segment_id = f"seg_{turn.id:04d}"
+
+        # Calculate timestamps
+        t0 = 0.0
+        t1 = 0.0
+        if start_dt and turn.created_at:
+            try:
+                turn_dt = datetime.fromisoformat(turn.created_at.replace("Z", "+00:00"))
+                t0 = (turn_dt - start_dt).total_seconds()
+                # Estimate t1 based on text length (rough heuristic: 150 words/minute)
+                word_count = len(turn.text.split())
+                duration_seconds = (word_count / 150) * 60
+                t1 = t0 + duration_seconds
+            except (ValueError, AttributeError):
+                pass
+
+        segments.append(
+            TranscriptSegment(
+                segment_id=segment_id,
+                t0=t0,
+                t1=t1,
+                speaker=turn.speaker,
+                text=turn.text,
+            )
+        )
+
+    return segments

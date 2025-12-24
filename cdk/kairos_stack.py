@@ -220,6 +220,23 @@ class KairosStack(Stack):
             time_to_live_attribute="ttl",
         )
 
+        # === DynamoDB Table for Transcripts (Slice 3) ===
+        transcripts_table = dynamodb.Table(
+            self,
+            "TranscriptsTable",
+            table_name="kairos-transcripts",
+            partition_key=dynamodb.Attribute(
+                name="pk", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="sk", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,  # For dev - change for prod
+            time_to_live_attribute="ttl",
+        )
+
+
         # === Calendar Webhook Lambda ===
         calendar_webhook_fn = lambda_.Function(
             self,
@@ -512,6 +529,11 @@ class KairosStack(Stack):
         # Add meetings table access for marking meetings debriefed
         webhook_fn.add_environment("MEETINGS_TABLE", meetings_table.table_name)
         meetings_table.grant_read_write_data(webhook_fn)
+
+        # Add transcripts table access for storing transcript segments (Slice 3)
+        webhook_fn.add_environment("TRANSCRIPTS_TABLE", transcripts_table.table_name)
+        transcripts_table.grant_read_write_data(webhook_fn)
+
 
         # Add Google Calendar SSM access for deleting debrief event
         webhook_fn.add_to_role_policy(
