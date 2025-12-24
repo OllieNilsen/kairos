@@ -9,7 +9,6 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field, field_validator
 
-
 # === Slice 3: Knowledge Graph Enums ===
 
 
@@ -44,6 +43,7 @@ class EdgeType(str, Enum):
     WORKS_ON = "WORKS_ON"  # Person -> Project
     RELATES_TO = "RELATES_TO"  # Person -> Person (with label)
     INTRODUCED = "INTRODUCED"  # Person -> Person (who introduced whom)
+
 
 # === User State (Slice 2 MVP) ===
 
@@ -352,7 +352,9 @@ class Mention(BaseModel):
     resolution_state: ResolutionState = ResolutionState.AMBIGUOUS
     linked_entity_id: str | None = None  # Final linked entity
     candidate_entity_ids: list[str] = Field(default_factory=list)  # For ambiguous
-    candidate_scores: list[dict] = Field(default_factory=list)  # {entity_id, score, reasoning}
+    candidate_scores: list[dict[str, Any]] = Field(
+        default_factory=list
+    )  # {entity_id, score, reasoning}
     confidence: float = 0.0
 
     # Metadata
@@ -383,7 +385,7 @@ class Edge(BaseModel):
     meeting_id: str  # Where this relationship was established
 
     # Properties (type-specific)
-    properties: dict = Field(default_factory=dict)
+    properties: dict[str, Any] = Field(default_factory=dict)
     # For RELATES_TO: {"label": "advisor", "cofounder", "investor"}
     # For INTRODUCED: {"introduced_by": entity_id}
 
