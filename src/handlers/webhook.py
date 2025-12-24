@@ -201,6 +201,12 @@ def handler(event: dict[str, Any], context: LambdaContext) -> dict[str, Any]:
         if isinstance(body, str):
             body = json.loads(body)
 
+        # DEBUG: Log full raw payload to inspect Bland's actual structure
+        logger.info(
+            "RAW_WEBHOOK_PAYLOAD",
+            extra={"raw_payload": body},
+        )
+
         payload = BlandWebhookPayload.model_validate(body)
         logger.info(
             "Received webhook",
