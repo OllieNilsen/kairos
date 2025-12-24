@@ -346,7 +346,7 @@ def extract_attendee_names(event: dict[str, Any]) -> list[str]:
     return names
 
 
-def extract_attendees(event: dict[str, Any]) -> list["AttendeeInfo"]:
+def extract_attendees(event: dict[str, Any]) -> list[AttendeeInfo]:
     """Extract full attendee information from a calendar event.
 
     Args:

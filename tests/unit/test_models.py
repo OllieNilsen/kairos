@@ -118,8 +118,12 @@ class TestBlandWebhookPayload:
             **{"from": "+18005551234"},  # 'from' is a reserved keyword
             call_length=3.5,
             transcripts=[
-                TranscriptTurn(id=1, user="assistant", text="Hello", created_at="2025-01-01T10:00:00Z"),
-                TranscriptTurn(id=2, user="user", text="Hi there", created_at="2025-01-01T10:00:05Z"),
+                TranscriptTurn(
+                    id=1, user="assistant", text="Hello", created_at="2025-01-01T10:00:00Z"
+                ),
+                TranscriptTurn(
+                    id=2, user="user", text="Hi there", created_at="2025-01-01T10:00:05Z"
+                ),
             ],
             concatenated_transcript="Assistant: Hello\nUser: Hi there",
         )
