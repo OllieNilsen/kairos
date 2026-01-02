@@ -504,15 +504,26 @@ For MVP single-user, store the **Google refresh token in SSM**, not DynamoDB (av
 
 ---
 
-## Intent Parsing (SMS)
+## Intent Parsing (SMS) — AI-First
 
-| User Says | Intent | Action |
-|-----------|--------|--------|
-| yes, yeah, yep, ok, okay, sure, call, go | `YES` | Initiate call |
-| ready, i'm ready, now | `READY` | Clear snooze, initiate call |
-| no, nope, nah, later, skip, busy | `NO` | Snooze until tomorrow |
-| stop, unsubscribe, quit, cancel | `STOP` | Set `stopped = true`, confirm opt-out |
-| anything else | `UNKNOWN` | Reply with brief help message |
+Uses LLM classification instead of brittle keyword matching. The LLM returns structured JSON validated by Pydantic.
+
+**Intent Types:**
+
+| Intent | Meaning | Action |
+|--------|---------|--------|
+| `YES` | User agrees to start the call | Initiate call |
+| `READY` | User explicitly says they're ready | Clear snooze, initiate call |
+| `NO` | User declines or wants to skip | Snooze until tomorrow |
+| `STOP` | User wants permanent opt-out | Set `stopped = true`, confirm opt-out |
+| `UNKNOWN` | Cannot determine intent | Reply with brief help message |
+
+**Implementation:**
+- `src/core/sms_intent.py` defines `parse_sms_intent(body, llm_client)`
+- Uses `LLMClient` protocol (no model coupling)
+- LLM (Haiku for speed/cost) classifies with system prompt describing each intent
+- Returns `SMSIntentResponse` JSON: `{"intent": "<INTENT>", "reasoning": "<explanation>"}`
+- Falls back to `UNKNOWN` on any LLM or parsing error (fail-safe)
 
 ---
 
