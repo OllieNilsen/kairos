@@ -91,6 +91,53 @@ class UserState(BaseModel):
     google_channel_expiry: str | None = None
 
 
+# === SMS Intent (Slice 2 - Twilio Integration) ===
+
+
+class SMSIntent(str, Enum):
+    """Parsed intent from inbound SMS message.
+
+    Used to determine user's response to the daily debrief prompt.
+    """
+
+    YES = "yes"  # User wants to start the call now
+    READY = "ready"  # User is ready (also clears snooze)
+    NO = "no"  # User wants to skip/snooze until tomorrow
+    STOP = "stop"  # User wants to opt out of all future prompts
+    UNKNOWN = "unknown"  # Could not parse intent - send help message
+
+
+class TwilioInboundSMS(BaseModel):
+    """Inbound SMS webhook payload from Twilio.
+
+    Twilio sends form-encoded data; we parse it into this model.
+    See: https://www.twilio.com/docs/messaging/guides/webhook-request
+    """
+
+    # Required fields from Twilio
+    MessageSid: str  # Unique identifier for this message
+    AccountSid: str  # Twilio account SID
+    From: str  # Sender phone number (E.164 format)
+    To: str  # Recipient phone number (our Twilio number)
+    Body: str  # Message text content
+
+    # Optional fields
+    NumMedia: int = 0  # Number of media attachments
+    NumSegments: int = 1  # Number of SMS segments
+
+    # Geographic info (may not always be present)
+    FromCity: str | None = None
+    FromState: str | None = None
+    FromZip: str | None = None
+    FromCountry: str | None = None
+    ToCity: str | None = None
+    ToState: str | None = None
+    ToZip: str | None = None
+    ToCountry: str | None = None
+
+    model_config = {"extra": "ignore"}  # Ignore additional Twilio fields
+
+
 # === Trigger Payload (User -> Trigger Lambda) ===
 
 

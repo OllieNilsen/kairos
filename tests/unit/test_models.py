@@ -20,9 +20,11 @@ from src.core.models import (
     MentionEvidence,
     MentionExtraction,
     ResolutionState,
+    SMSIntent,
     TranscriptSegment,
     TranscriptTurn,
     TriggerPayload,
+    TwilioInboundSMS,
     VerificationResult,
 )
 
@@ -631,3 +633,143 @@ class TestCandidateScore:
         )
         assert score.confidence == "LOW"
         assert score.score < 0.5
+
+
+# === Slice 2: SMS/Twilio Model Tests ===
+
+
+class TestSMSIntent:
+    """Tests for SMSIntent enum."""
+
+    def test_all_intents_defined(self):
+        """All SMS intents should be defined."""
+        assert SMSIntent.YES.value == "yes"
+        assert SMSIntent.READY.value == "ready"
+        assert SMSIntent.NO.value == "no"
+        assert SMSIntent.STOP.value == "stop"
+        assert SMSIntent.UNKNOWN.value == "unknown"
+
+    def test_sms_intent_is_string_enum(self):
+        """SMSIntent should be usable as string."""
+        assert SMSIntent.YES == "yes"
+        assert SMSIntent.STOP == "stop"
+
+    def test_all_intents_count(self):
+        """Should have exactly 5 intents."""
+        assert len(SMSIntent) == 5
+
+
+class TestTwilioInboundSMS:
+    """Tests for TwilioInboundSMS model."""
+
+    def test_valid_minimal_payload(self):
+        """Valid minimal Twilio inbound SMS payload."""
+        sms = TwilioInboundSMS(
+            MessageSid="SM1234567890abcdef",
+            AccountSid="AC1234567890abcdef",
+            From="+15551234567",
+            To="+447700900123",
+            Body="Yes",
+        )
+        assert sms.MessageSid == "SM1234567890abcdef"
+        assert sms.AccountSid == "AC1234567890abcdef"
+        assert sms.From == "+15551234567"
+        assert sms.To == "+447700900123"
+        assert sms.Body == "Yes"
+        # Defaults
+        assert sms.NumMedia == 0
+        assert sms.NumSegments == 1
+
+    def test_full_payload_with_geo(self):
+        """Twilio payload with geographic info."""
+        sms = TwilioInboundSMS(
+            MessageSid="SM1234567890abcdef",
+            AccountSid="AC1234567890abcdef",
+            From="+15551234567",
+            To="+447700900123",
+            Body="Ready for call",
+            NumMedia=0,
+            NumSegments=1,
+            FromCity="New York",
+            FromState="NY",
+            FromZip="10001",
+            FromCountry="US",
+            ToCity="London",
+            ToCountry="GB",
+        )
+        assert sms.FromCity == "New York"
+        assert sms.FromState == "NY"
+        assert sms.FromCountry == "US"
+        assert sms.ToCity == "London"
+        assert sms.ToCountry == "GB"
+
+    def test_ignores_extra_fields(self):
+        """Should ignore unknown fields from Twilio webhook."""
+        sms = TwilioInboundSMS.model_validate(
+            {
+                "MessageSid": "SM1234567890abcdef",
+                "AccountSid": "AC1234567890abcdef",
+                "From": "+15551234567",
+                "To": "+447700900123",
+                "Body": "Yes",
+                "SmsMessageSid": "SM1234567890abcdef",  # Extra Twilio field
+                "SmsSid": "SM1234567890abcdef",  # Extra Twilio field
+                "ApiVersion": "2010-04-01",  # Extra Twilio field
+                "UnknownField": "ignored",  # Unknown field
+            }
+        )
+        assert sms.MessageSid == "SM1234567890abcdef"
+        assert sms.Body == "Yes"
+
+    def test_empty_body_is_valid(self):
+        """Empty message body should be valid (edge case)."""
+        sms = TwilioInboundSMS(
+            MessageSid="SM1234567890abcdef",
+            AccountSid="AC1234567890abcdef",
+            From="+15551234567",
+            To="+447700900123",
+            Body="",
+        )
+        assert sms.Body == ""
+
+    def test_multiline_body(self):
+        """Message with multiple lines."""
+        sms = TwilioInboundSMS(
+            MessageSid="SM1234567890abcdef",
+            AccountSid="AC1234567890abcdef",
+            From="+15551234567",
+            To="+447700900123",
+            Body="Yes, I'm ready.\nCall me now please.",
+        )
+        assert "\n" in sms.Body
+        assert "ready" in sms.Body.lower()
+
+    def test_required_fields_validation(self):
+        """Should fail without required fields."""
+        with pytest.raises(ValidationError) as exc_info:
+            TwilioInboundSMS(
+                AccountSid="AC1234567890abcdef",
+                From="+15551234567",
+                To="+447700900123",
+                Body="Yes",
+                # Missing MessageSid
+            )
+        assert "MessageSid" in str(exc_info.value)
+
+    def test_geo_fields_optional(self):
+        """Geographic fields are optional."""
+        sms = TwilioInboundSMS(
+            MessageSid="SM1234567890abcdef",
+            AccountSid="AC1234567890abcdef",
+            From="+15551234567",
+            To="+447700900123",
+            Body="Yes",
+        )
+        assert sms.FromCity is None
+        assert sms.FromState is None
+        assert sms.FromZip is None
+        assert sms.FromCountry is None
+        assert sms.ToCity is None
+        assert sms.ToState is None
+        assert sms.ToZip is None
+        assert sms.ToCountry is None
