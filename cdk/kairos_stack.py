@@ -30,6 +30,11 @@ SSM_GOOGLE_CLIENT_ID = "/kairos/google-client-id"
 SSM_GOOGLE_CLIENT_SECRET = "/kairos/google-client-secret"
 SSM_GOOGLE_REFRESH_TOKEN = "/kairos/google-refresh-token"
 
+# Slice 2E: Twilio SMS
+SSM_TWILIO_ACCOUNT_SID = "/kairos/twilio-account-sid"
+SSM_TWILIO_AUTH_TOKEN = "/kairos/twilio-auth-token"
+SSM_TWILIO_FROM_NUMBER = "/kairos/twilio-from-number"
+
 
 class KairosStack(Stack):
     """Main infrastructure stack for Kairos."""
@@ -458,6 +463,9 @@ class KairosStack(Stack):
                 "IDEMPOTENCY_TABLE": idempotency_table.table_name,
                 "MEETINGS_TABLE": meetings_table.table_name,
                 "SSM_BLAND_API_KEY": SSM_BLAND_API_KEY,
+                "SSM_TWILIO_ACCOUNT_SID": SSM_TWILIO_ACCOUNT_SID,
+                "SSM_TWILIO_AUTH_TOKEN": SSM_TWILIO_AUTH_TOKEN,
+                "SSM_TWILIO_FROM_NUMBER": SSM_TWILIO_FROM_NUMBER,
                 "WEBHOOK_URL": webhook_url.url,
                 "POWERTOOLS_SERVICE_NAME": "kairos-prompt-sender",
             },
@@ -493,6 +501,71 @@ class KairosStack(Stack):
             treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
         )
         prompt_sender_alarm.add_alarm_action(cw_actions.SnsAction(alarm_topic))
+
+        # ========================================
+        # SLICE 2E: SMS Webhook (Twilio Inbound)
+        # ========================================
+
+        # === SMS Webhook Lambda ===
+        sms_webhook_fn = lambda_.Function(
+            self,
+            "SmsWebhookFunction",
+            function_name="kairos-sms-webhook",
+            code=lambda_.Code.from_asset(src_path),
+            handler="handlers.sms_webhook.handler",
+            environment={
+                "USER_STATE_TABLE": user_state_table.table_name,
+                "IDEMPOTENCY_TABLE": idempotency_table.table_name,
+                "MEETINGS_TABLE": meetings_table.table_name,
+                "SSM_TWILIO_AUTH_TOKEN": SSM_TWILIO_AUTH_TOKEN,
+                "SSM_ANTHROPIC_API_KEY": SSM_ANTHROPIC_API_KEY,
+                "SSM_BLAND_API_KEY": SSM_BLAND_API_KEY,
+                "WEBHOOK_URL": webhook_url.url,
+                "POWERTOOLS_SERVICE_NAME": "kairos-sms-webhook",
+            },
+            timeout=Duration.seconds(60),  # Longer timeout for LLM + Bland calls
+            **{k: v for k, v in common_lambda_props.items() if k != "timeout"},
+        )
+
+        # Grant DynamoDB access
+        user_state_table.grant_read_write_data(sms_webhook_fn)
+        idempotency_table.grant_read_write_data(sms_webhook_fn)
+        meetings_table.grant_read_data(sms_webhook_fn)
+
+        # Grant SSM read access for Twilio, Anthropic, and Bland API keys
+        sms_webhook_fn.add_to_role_policy(
+            iam.PolicyStatement(
+                actions=["ssm:GetParameter"],
+                resources=[
+                    f"arn:aws:ssm:{self.region}:{self.account}:parameter{SSM_TWILIO_AUTH_TOKEN}",
+                    f"arn:aws:ssm:{self.region}:{self.account}:parameter{SSM_ANTHROPIC_API_KEY}",
+                    f"arn:aws:ssm:{self.region}:{self.account}:parameter{SSM_BLAND_API_KEY}",
+                ],
+            )
+        )
+
+        # Function URL for Twilio webhook callbacks
+        sms_webhook_url = sms_webhook_fn.add_function_url(
+            auth_type=lambda_.FunctionUrlAuthType.NONE,
+            cors=lambda_.FunctionUrlCorsOptions(
+                allowed_origins=["*"],
+                allowed_methods=[lambda_.HttpMethod.POST],
+            ),
+        )
+
+        # === CloudWatch Alarm for SMS Webhook Errors ===
+        sms_webhook_errors = sms_webhook_fn.metric_errors(period=Duration.minutes(5))
+        sms_webhook_alarm = cloudwatch.Alarm(
+            self,
+            "SmsWebhookErrorAlarm",
+            metric=sms_webhook_errors,
+            threshold=1,
+            evaluation_periods=1,
+            alarm_description="Kairos SMS webhook Lambda errors",
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+        sms_webhook_alarm.add_alarm_action(cw_actions.SnsAction(alarm_topic))
 
         # === IAM Role for EventBridge Scheduler ===
         scheduler_role = iam.Role(
@@ -733,4 +806,10 @@ class KairosStack(Stack):
             "CalendarWebhookUrl",
             value=calendar_webhook_url.url,
             description="Webhook URL for Google Calendar push notifications",
+        )
+        cdk.CfnOutput(
+            self,
+            "SmsWebhookUrl",
+            value=sms_webhook_url.url,
+            description="Webhook URL for Twilio SMS callbacks",
         )
