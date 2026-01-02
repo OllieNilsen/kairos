@@ -64,23 +64,23 @@ class TestPromptSenderHandler:
             ),
         ]
 
-    def test_already_called_returns_200(self, mock_env: dict[str, str]) -> None:
-        """Should return 200 if call already initiated today."""
+    def test_already_sent_returns_200(self, mock_env: dict[str, str]) -> None:
+        """Should return 200 if SMS already sent today."""
         from src.handlers.prompt_sender import handler
 
         event = {"user_id": "user-001", "date": "2024-01-15"}
 
-        mock_call_dedup = MagicMock()
-        mock_call_dedup.try_initiate_call.return_value = False
+        mock_sms_dedup = MagicMock()
+        mock_sms_dedup.try_send_daily_prompt.return_value = False
 
         with (
             patch.dict("os.environ", mock_env),
-            patch("src.handlers.prompt_sender.CallBatchDedup", return_value=mock_call_dedup),
+            patch("src.handlers.prompt_sender.SMSSendDedup", return_value=mock_sms_dedup),
         ):
             response = handler(event, MagicMock())
 
         assert response["statusCode"] == 200
-        assert response["body"]["status"] == "already_called"
+        assert response["body"]["status"] == "already_sent"
 
     def test_user_not_found_returns_404(self, mock_env: dict[str, str]) -> None:
         """Should return 404 if user not found."""
@@ -88,15 +88,15 @@ class TestPromptSenderHandler:
 
         event = {"user_id": "user-001", "date": "2024-01-15"}
 
-        mock_call_dedup = MagicMock()
-        mock_call_dedup.try_initiate_call.return_value = True
+        mock_sms_dedup = MagicMock()
+        mock_sms_dedup.try_send_daily_prompt.return_value = True
 
         mock_user_repo = MagicMock()
         mock_user_repo.get_user_state.return_value = None
 
         with (
             patch.dict("os.environ", mock_env),
-            patch("src.handlers.prompt_sender.CallBatchDedup", return_value=mock_call_dedup),
+            patch("src.handlers.prompt_sender.SMSSendDedup", return_value=mock_sms_dedup),
             patch(
                 "src.handlers.prompt_sender.UserStateRepository",
                 return_value=mock_user_repo,
@@ -115,15 +115,16 @@ class TestPromptSenderHandler:
         sample_user_state.stopped = True
         event = {"user_id": "user-001", "date": "2024-01-15"}
 
-        mock_call_dedup = MagicMock()
-        mock_call_dedup.try_initiate_call.return_value = True
+        mock_sms_dedup = MagicMock()
+        mock_sms_dedup.try_send_daily_prompt.return_value = True
 
         mock_user_repo = MagicMock()
         mock_user_repo.get_user_state.return_value = sample_user_state
+        mock_user_repo.can_prompt.return_value = (False, "stopped")
 
         with (
             patch.dict("os.environ", mock_env),
-            patch("src.handlers.prompt_sender.CallBatchDedup", return_value=mock_call_dedup),
+            patch("src.handlers.prompt_sender.SMSSendDedup", return_value=mock_sms_dedup),
             patch(
                 "src.handlers.prompt_sender.UserStateRepository",
                 return_value=mock_user_repo,
@@ -132,7 +133,7 @@ class TestPromptSenderHandler:
             response = handler(event, MagicMock())
 
         assert response["statusCode"] == 200
-        assert response["body"]["status"] == "user_stopped"
+        assert response["body"]["status"] == "stopped"
 
     def test_no_meetings_returns_200(
         self, mock_env: dict[str, str], sample_user_state: UserState
@@ -142,18 +143,19 @@ class TestPromptSenderHandler:
 
         event = {"user_id": "user-001", "date": "2024-01-15"}
 
-        mock_call_dedup = MagicMock()
-        mock_call_dedup.try_initiate_call.return_value = True
+        mock_sms_dedup = MagicMock()
+        mock_sms_dedup.try_send_daily_prompt.return_value = True
 
         mock_user_repo = MagicMock()
         mock_user_repo.get_user_state.return_value = sample_user_state
+        mock_user_repo.can_prompt.return_value = (True, "ok")
 
         mock_meetings_repo = MagicMock()
         mock_meetings_repo.get_pending_meetings.return_value = []
 
         with (
             patch.dict("os.environ", mock_env),
-            patch("src.handlers.prompt_sender.CallBatchDedup", return_value=mock_call_dedup),
+            patch("src.handlers.prompt_sender.SMSSendDedup", return_value=mock_sms_dedup),
             patch(
                 "src.handlers.prompt_sender.UserStateRepository",
                 return_value=mock_user_repo,
