@@ -42,7 +42,9 @@ class MockLLMClient:
         self.call_count += 1
         return self._response
 
-    def structured_completion(self, prompt: str, output_model: type, system_prompt: str | None = None):
+    def structured_completion(
+        self, prompt: str, output_model: type, system_prompt: str | None = None
+    ):
         """Stub for protocol compliance."""
         raise NotImplementedError
 
@@ -53,7 +55,9 @@ class RaisingLLMClient:
     def complete(self, prompt: str, system_prompt: str | None = None) -> str:
         raise RuntimeError("LLM service unavailable")
 
-    def structured_completion(self, prompt: str, output_model: type, system_prompt: str | None = None):
+    def structured_completion(
+        self, prompt: str, output_model: type, system_prompt: str | None = None
+    ):
         raise NotImplementedError
 
 

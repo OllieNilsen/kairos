@@ -79,9 +79,7 @@ def handler(event: dict[str, Any], context: LambdaContext) -> dict[str, Any]:
     bland = get_bland_client()
 
     try:
-        call_id = asyncio.get_event_loop().run_until_complete(
-            bland.initiate_call(payload, system_prompt, webhook_url)
-        )
+        call_id = asyncio.run(bland.initiate_call(payload, system_prompt, webhook_url))
         logger.info("Call initiated", extra={"call_id": call_id})
 
         return _response(

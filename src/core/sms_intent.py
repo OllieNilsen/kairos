@@ -56,7 +56,7 @@ Respond with ONLY valid JSON (no markdown):
 {{"intent": "<YES|READY|NO|STOP|UNKNOWN>", "reasoning": "<brief explanation>"}}"""
 
 
-def parse_sms_intent(body: str, llm_client: "LLMClient") -> SMSIntent:
+def parse_sms_intent(body: str, llm_client: LLMClient) -> SMSIntent:
     """Parse user intent from SMS message body using LLM classification.
 
     Uses AI-first approach: LLM classifies the intent instead of brittle

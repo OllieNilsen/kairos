@@ -23,7 +23,6 @@ try:
     from adapters.meetings_repo import MeetingsRepository
     from adapters.ssm import get_parameter
     from adapters.twilio_sms import (
-        TwilioClient,
         build_twiml_response,
         parse_twilio_webhook_body,
         verify_twilio_signature,
@@ -39,7 +38,6 @@ except ImportError:
     from src.adapters.meetings_repo import MeetingsRepository
     from src.adapters.ssm import get_parameter
     from src.adapters.twilio_sms import (
-        TwilioClient,
         build_twiml_response,
         parse_twilio_webhook_body,
         verify_twilio_signature,
@@ -273,7 +271,7 @@ def _handle_ready(user_id: str, phone_number: str) -> dict[str, Any]:
             "meeting_titles": [m.title for m in pending_meetings],
         }
 
-        call_id = asyncio.get_event_loop().run_until_complete(
+        call_id = asyncio.run(
             bland.initiate_call_raw(
                 phone_number=phone_number,
                 system_prompt=system_prompt,
@@ -290,7 +288,7 @@ def _handle_ready(user_id: str, phone_number: str) -> dict[str, Any]:
 
         return _twiml_response(REPLY_STARTING_CALL)
 
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to initiate call")
         call_dedup.release_call(user_id, date_str)
         return _twiml_response("Sorry, there was an error. Please try again.")
@@ -361,4 +359,3 @@ def _build_webhook_url(event: dict[str, Any]) -> str:
 
     # Last resort - use configured URL
     return os.environ.get("SMS_WEBHOOK_URL", "")
-

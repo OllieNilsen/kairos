@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 from src.core.models import SMSIntent, UserState
 from src.handlers.sms_webhook import (
@@ -88,7 +85,8 @@ class TestHandleNo:
 
         result = _handle_no("user-001")
 
-        assert REPLY_SNOOZED in result["body"]
+        # Message is XML-escaped, so check for escaped version
+        assert "check in again tomorrow" in result["body"]
         mock_repo.set_snooze.assert_called_once()
 
         # Check snooze time is tomorrow
@@ -109,7 +107,8 @@ class TestHandleStop:
 
         result = _handle_stop("user-001")
 
-        assert REPLY_STOPPED in result["body"]
+        # Message may be XML-escaped
+        assert "unsubscribed" in result["body"]
         mock_repo.set_stop.assert_called_once_with("user-001", stop=True)
 
 
@@ -144,7 +143,6 @@ class TestHandleReady:
         mock_get_param.return_value = "test-api-key"
 
         # Create async mock for initiate_call_raw
-        import asyncio
 
         async def mock_call(*args: Any, **kwargs: Any) -> str:
             return "call-123"
@@ -153,7 +151,8 @@ class TestHandleReady:
 
         result = _handle_ready("user-001", "+15551234567")
 
-        assert REPLY_STARTING_CALL in result["body"]
+        # Message may be XML-escaped
+        assert "Calling you now" in result["body"]
         mock_call_dedup.return_value.try_initiate_call.assert_called_once()
 
     @patch("src.handlers.sms_webhook.get_call_dedup")
@@ -163,20 +162,20 @@ class TestHandleReady:
 
         result = _handle_ready("user-001", "+15551234567")
 
-        assert REPLY_ALREADY_CALLED in result["body"]
+        # Message may be XML-escaped
+        assert "already in progress" in result["body"]
 
     @patch("src.handlers.sms_webhook.get_meetings_repo")
     @patch("src.handlers.sms_webhook.get_call_dedup")
-    def test_no_meetings(
-        self, mock_call_dedup: MagicMock, mock_meetings_repo: MagicMock
-    ) -> None:
+    def test_no_meetings(self, mock_call_dedup: MagicMock, mock_meetings_repo: MagicMock) -> None:
         """Should return no-meetings message if nothing to debrief."""
         mock_call_dedup.return_value.try_initiate_call.return_value = True
         mock_meetings_repo.return_value.get_pending_meetings.return_value = []
 
         result = _handle_ready("user-001", "+15551234567")
 
-        assert REPLY_NO_MEETINGS in result["body"]
+        # Message may be XML-escaped
+        assert "No meetings to debrief" in result["body"]
         # Should release the call lock
         mock_call_dedup.return_value.release_call.assert_called_once()
 
@@ -186,7 +185,7 @@ class TestHandler:
 
     def _make_event(
         self,
-        body: str = "Body=Yes&From=%2B15551234567&MessageSid=SM123",
+        body: str = "Body=Yes&From=%2B15551234567&To=%2B447700900123&AccountSid=AC123&MessageSid=SM123",
         signature: str = "valid-sig",
     ) -> dict[str, Any]:
         """Create a mock Lambda event."""
@@ -251,12 +250,15 @@ class TestHandler:
         )
         mock_parse.return_value = SMSIntent.UNKNOWN
 
-        event = self._make_event(body="Body=purple%20elephant&From=%2B15551234567&MessageSid=SM123")
+        event = self._make_event(
+            body="Body=purple%20elephant&From=%2B15551234567&To=%2B447700900123&AccountSid=AC123&MessageSid=SM123"
+        )
 
         with patch.dict("os.environ", {"SSM_TWILIO_AUTH_TOKEN": "/kairos/test"}):
             result = handler(event, MagicMock())
 
-        assert REPLY_UNKNOWN in result["body"]
+        # Message may be XML-escaped
+        assert "didn" in result["body"]  # "I didn't understand that"
 
     def test_missing_message_sid(self) -> None:
         """Should return 400 for missing MessageSid."""
@@ -268,9 +270,7 @@ class TestHandler:
 
     @patch("src.handlers.sms_webhook.verify_twilio_signature")
     @patch("src.handlers.sms_webhook.get_parameter")
-    def test_invalid_signature(
-        self, mock_param: MagicMock, mock_verify: MagicMock
-    ) -> None:
+    def test_invalid_signature(self, mock_param: MagicMock, mock_verify: MagicMock) -> None:
         """Should return 401 for invalid signature."""
         mock_param.return_value = "auth-token"
         mock_verify.return_value = False
@@ -372,4 +372,3 @@ class TestReplyMessages:
         """Unknown message should guide user on what to reply."""
         assert "YES" in REPLY_UNKNOWN or "yes" in REPLY_UNKNOWN.lower()
         assert "NO" in REPLY_UNKNOWN or "no" in REPLY_UNKNOWN.lower()
-
