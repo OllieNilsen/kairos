@@ -211,7 +211,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             "meeting_titles": [m.title for m in pending_meetings],
         }
 
-        call_id = asyncio.get_event_loop().run_until_complete(
+        call_id = asyncio.run(
             bland.initiate_call_raw(
                 phone_number=phone_number,
                 system_prompt=system_prompt,

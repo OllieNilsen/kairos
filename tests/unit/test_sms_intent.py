@@ -4,11 +4,11 @@ import json
 
 import pytest
 
+from src.core.interfaces import LLMClient
 from src.core.models import SMSIntent
 from src.core.sms_intent import (
     INTENT_CLASSIFICATION_PROMPT,
     INTENT_CLASSIFICATION_SYSTEM,
-    LLMClient,
     SMSIntentResponse,
     parse_sms_intent,
 )
@@ -18,6 +18,7 @@ class MockLLMClient:
     """Mock LLM client for testing.
 
     Returns predetermined responses based on the input prompt.
+    Implements the LLMClient protocol from interfaces.py.
     """
 
     def __init__(self, response: str | dict | None = None):
@@ -31,22 +32,33 @@ class MockLLMClient:
         else:
             self._response = response or '{"intent": "UNKNOWN", "reasoning": "test"}'
         self.last_prompt: str | None = None
-        self.last_system: str | None = None
+        self.last_system_prompt: str | None = None
         self.call_count = 0
 
-    def complete(self, prompt: str, system: str = "", max_tokens: int = 100) -> str:
+    def complete(self, prompt: str, system_prompt: str | None = None) -> str:
         """Record the call and return the fixed response."""
         self.last_prompt = prompt
-        self.last_system = system
+        self.last_system_prompt = system_prompt
         self.call_count += 1
         return self._response
+
+    def structured_completion(
+        self, prompt: str, output_model: type, system_prompt: str | None = None
+    ):
+        """Stub for protocol compliance."""
+        raise NotImplementedError
 
 
 class RaisingLLMClient:
     """Mock LLM client that raises an exception."""
 
-    def complete(self, prompt: str, system: str = "", max_tokens: int = 100) -> str:
+    def complete(self, prompt: str, system_prompt: str | None = None) -> str:
         raise RuntimeError("LLM service unavailable")
+
+    def structured_completion(
+        self, prompt: str, output_model: type, system_prompt: str | None = None
+    ):
+        raise NotImplementedError
 
 
 class TestSMSIntentResponse:
@@ -178,7 +190,7 @@ class TestParseIntentWithLLM:
         """Should pass the system prompt to LLM."""
         client = MockLLMClient({"intent": "YES"})
         parse_sms_intent("yes", client)
-        assert client.last_system == INTENT_CLASSIFICATION_SYSTEM
+        assert client.last_system_prompt == INTENT_CLASSIFICATION_SYSTEM
 
     def test_body_is_stripped(self):
         """Should strip whitespace from body before including in prompt."""
@@ -224,7 +236,7 @@ class TestLLMClientProtocol:
         """MockLLMClient should implement LLMClient protocol."""
         client: LLMClient = MockLLMClient()
         # Should not raise - protocol is satisfied
-        result = client.complete("test", system="sys", max_tokens=50)
+        result = client.complete("test", system_prompt="sys")
         assert isinstance(result, str)
 
     def test_protocol_requires_complete_method(self):
