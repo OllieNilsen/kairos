@@ -5,7 +5,7 @@ Uses LLM-based classification (AI-first) instead of brittle keyword matching.
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
@@ -15,32 +15,19 @@ try:
 except ImportError:
     from src.core.models import SMSIntent
 
+if TYPE_CHECKING:
+    # Use the canonical LLMClient protocol from interfaces
+    try:
+        from core.interfaces import LLMClient
+    except ImportError:
+        from src.core.interfaces import LLMClient
+
 
 class SMSIntentResponse(BaseModel):
     """Structured response from LLM intent classification."""
 
     intent: str = Field(description="One of: YES, READY, NO, STOP, UNKNOWN")
     reasoning: str = Field(default="", description="Brief explanation")
-
-
-class LLMClient(Protocol):
-    """Protocol for LLM clients used in intent classification.
-
-    This allows swapping providers without changing the core logic.
-    """
-
-    def complete(self, prompt: str, system: str = "", max_tokens: int = 100) -> str:
-        """Complete a prompt and return the response text.
-
-        Args:
-            prompt: The user prompt
-            system: Optional system prompt
-            max_tokens: Maximum tokens in response
-
-        Returns:
-            The model's response text
-        """
-        ...
 
 
 # System prompt for intent classification
@@ -69,7 +56,7 @@ Respond with ONLY valid JSON (no markdown):
 {{"intent": "<YES|READY|NO|STOP|UNKNOWN>", "reasoning": "<brief explanation>"}}"""
 
 
-def parse_sms_intent(body: str, llm_client: LLMClient) -> SMSIntent:
+def parse_sms_intent(body: str, llm_client: "LLMClient") -> SMSIntent:
     """Parse user intent from SMS message body using LLM classification.
 
     Uses AI-first approach: LLM classifies the intent instead of brittle
@@ -100,8 +87,7 @@ def parse_sms_intent(body: str, llm_client: LLMClient) -> SMSIntent:
         # Call LLM for classification
         response = llm_client.complete(
             prompt=prompt,
-            system=INTENT_CLASSIFICATION_SYSTEM,
-            max_tokens=100,
+            system_prompt=INTENT_CLASSIFICATION_SYSTEM,
         )
 
         # Parse and validate the response
