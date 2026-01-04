@@ -177,7 +177,9 @@ class TranscriptTurn(BaseModel):
     """
 
     id: int  # Unique segment ID from Bland
-    user: Literal["assistant", "user", "agent-action"]  # Bland uses 'user' for speaker, 'agent-action' for actions
+    user: Literal[
+        "assistant", "user", "agent-action"
+    ]  # Bland uses 'user' for speaker, 'agent-action' for actions
     text: str
     created_at: str  # ISO timestamp when this segment was spoken
 
