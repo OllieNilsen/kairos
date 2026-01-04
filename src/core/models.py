@@ -177,12 +177,12 @@ class TranscriptTurn(BaseModel):
     """
 
     id: int  # Unique segment ID from Bland
-    user: Literal["assistant", "user"]  # Bland uses 'user' for speaker role
+    user: Literal["assistant", "user", "agent-action"]  # Bland uses 'user' for speaker, 'agent-action' for actions
     text: str
     created_at: str  # ISO timestamp when this segment was spoken
 
     @property
-    def speaker(self) -> Literal["assistant", "user"]:
+    def speaker(self) -> Literal["assistant", "user", "agent-action"]:
         """Alias for 'user' field for backward compatibility."""
         return self.user
 

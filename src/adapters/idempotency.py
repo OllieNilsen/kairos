@@ -319,9 +319,12 @@ class DailyLease:
         Returns:
             True if lease acquired, False if already held by another owner
         """
+        from decimal import Decimal
+
         now = datetime.now(UTC)
-        expires_at = now.timestamp() + self.lease_duration
+        expires_at = Decimal(str(now.timestamp() + self.lease_duration))
         ttl = int(now.timestamp()) + 86400  # Auto-cleanup after 1 day
+        now_ts = Decimal(str(now.timestamp()))
 
         try:
             self.table.put_item(
@@ -333,7 +336,7 @@ class DailyLease:
                     "ttl": ttl,
                 },
                 ConditionExpression=("attribute_not_exists(idempotency_key) OR expires_at < :now"),
-                ExpressionAttributeValues={":now": now.timestamp()},
+                ExpressionAttributeValues={":now": now_ts},
             )
             return True
         except ClientError as e:

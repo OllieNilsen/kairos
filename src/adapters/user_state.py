@@ -56,6 +56,8 @@ class UserStateRepository:
         prompt_schedule_name: str | None = None,
         debrief_event_id: str | None = None,
         debrief_event_etag: str | None = None,
+        google_channel_id: str | None = None,
+        google_channel_expiry: str | None = None,
     ) -> None:
         """Reset daily state for a new day.
 
@@ -67,6 +69,8 @@ class UserStateRepository:
             prompt_schedule_name: Name of the EventBridge schedule
             debrief_event_id: Google Calendar event ID for the debrief
             debrief_event_etag: Etag of the calendar event
+            google_channel_id: Google Calendar push notification channel ID
+            google_channel_expiry: ISO8601 expiry time for the channel
         """
         now = datetime.now(UTC).isoformat()
 
@@ -101,6 +105,14 @@ class UserStateRepository:
         if debrief_event_etag is not None:
             update_expr += ", debrief_event_etag = :event_etag"
             expr_values[":event_etag"] = debrief_event_etag
+
+        if google_channel_id is not None:
+            update_expr += ", google_channel_id = :channel_id"
+            expr_values[":channel_id"] = google_channel_id
+
+        if google_channel_expiry is not None:
+            update_expr += ", google_channel_expiry = :channel_expiry"
+            expr_values[":channel_expiry"] = google_channel_expiry
 
         self.table.update_item(
             Key={"user_id": user_id},

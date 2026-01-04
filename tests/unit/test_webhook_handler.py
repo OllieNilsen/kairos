@@ -221,27 +221,28 @@ class TestHandleSuccessfulCall:
         payload.concatenated_transcript = "Test transcript"
 
         mock_user_repo = MagicMock()
-        mock_user_repo.get_user_state.return_value = MagicMock(debrief_event_id=None)
+        mock_user_state = MagicMock(debrief_event_id=None, phone_number="+1234567890")
+        mock_user_repo.get_user_state.return_value = mock_user_state
 
         mock_meetings_repo = MagicMock()
         mock_anthropic = MagicMock()
         mock_anthropic.summarize.return_value = "Summary"
-        mock_ses = MagicMock()
-        mock_ses.send_email.return_value = "msg-123"
+        mock_twilio = MagicMock()
+        mock_twilio.send_sms.return_value = "SM123"
 
         with (
             patch("src.handlers.webhook.get_user_repo", return_value=mock_user_repo),
             patch("src.handlers.webhook.get_meetings_repo", return_value=mock_meetings_repo),
             patch("src.handlers.webhook.get_calendar", return_value=None),
             patch("src.handlers.webhook.get_anthropic", return_value=mock_anthropic),
-            patch("src.handlers.webhook.get_ses", return_value=mock_ses),
-            patch.dict("os.environ", {"RECIPIENT_EMAIL": "test@example.com"}),
+            patch("src.handlers.webhook.get_twilio", return_value=mock_twilio),
         ):
             result = _handle_successful_call(payload, "user-001")
 
         mock_meetings_repo.mark_debriefed.assert_called_once_with(
             "user-001", ["meeting-1", "meeting-2"]
         )
+        mock_twilio.send_sms.assert_called_once()
         assert result["statusCode"] == 200
 
     def test_deletes_debrief_calendar_event(self) -> None:
@@ -253,23 +254,22 @@ class TestHandleSuccessfulCall:
         payload.variables = {}
         payload.concatenated_transcript = "Test transcript"
 
-        user_state = UserState(user_id="user-001", debrief_event_id="event-123")
+        user_state = UserState(user_id="user-001", debrief_event_id="event-123", phone_number="+1234567890")
         mock_user_repo = MagicMock()
         mock_user_repo.get_user_state.return_value = user_state
 
         mock_calendar = MagicMock()
         mock_anthropic = MagicMock()
         mock_anthropic.summarize.return_value = "Summary"
-        mock_ses = MagicMock()
-        mock_ses.send_email.return_value = "msg-123"
+        mock_twilio = MagicMock()
+        mock_twilio.send_sms.return_value = "SM123"
 
         with (
             patch("src.handlers.webhook.get_user_repo", return_value=mock_user_repo),
             patch("src.handlers.webhook.get_meetings_repo", return_value=None),
             patch("src.handlers.webhook.get_calendar", return_value=mock_calendar),
             patch("src.handlers.webhook.get_anthropic", return_value=mock_anthropic),
-            patch("src.handlers.webhook.get_ses", return_value=mock_ses),
-            patch.dict("os.environ", {"RECIPIENT_EMAIL": "test@example.com"}),
+            patch("src.handlers.webhook.get_twilio", return_value=mock_twilio),
         ):
             result = _handle_successful_call(payload, "user-001")
 
@@ -286,7 +286,7 @@ class TestHandleSuccessfulCall:
         payload.variables = {}
         payload.concatenated_transcript = "Test transcript"
 
-        user_state = UserState(user_id="user-001", debrief_event_id="event-123")
+        user_state = UserState(user_id="user-001", debrief_event_id="event-123", phone_number="+1234567890")
         mock_user_repo = MagicMock()
         mock_user_repo.get_user_state.return_value = user_state
 
@@ -295,22 +295,21 @@ class TestHandleSuccessfulCall:
 
         mock_anthropic = MagicMock()
         mock_anthropic.summarize.return_value = "Summary"
-        mock_ses = MagicMock()
-        mock_ses.send_email.return_value = "msg-123"
+        mock_twilio = MagicMock()
+        mock_twilio.send_sms.return_value = "SM123"
 
         with (
             patch("src.handlers.webhook.get_user_repo", return_value=mock_user_repo),
             patch("src.handlers.webhook.get_meetings_repo", return_value=None),
             patch("src.handlers.webhook.get_calendar", return_value=mock_calendar),
             patch("src.handlers.webhook.get_anthropic", return_value=mock_anthropic),
-            patch("src.handlers.webhook.get_ses", return_value=mock_ses),
-            patch.dict("os.environ", {"RECIPIENT_EMAIL": "test@example.com"}),
+            patch("src.handlers.webhook.get_twilio", return_value=mock_twilio),
         ):
             result = _handle_successful_call(payload, "user-001")
 
         # Should still succeed even if calendar delete fails
         assert result["statusCode"] == 200
-        mock_ses.send_email.assert_called_once()
+        mock_twilio.send_sms.assert_called_once()
 
     def test_skips_cleanup_when_no_debrief_event(self) -> None:
         """Should skip calendar cleanup when no debrief event exists."""
@@ -321,23 +320,22 @@ class TestHandleSuccessfulCall:
         payload.variables = {}
         payload.concatenated_transcript = "Test transcript"
 
-        user_state = UserState(user_id="user-001", debrief_event_id=None)
+        user_state = UserState(user_id="user-001", debrief_event_id=None, phone_number="+1234567890")
         mock_user_repo = MagicMock()
         mock_user_repo.get_user_state.return_value = user_state
 
         mock_calendar = MagicMock()
         mock_anthropic = MagicMock()
         mock_anthropic.summarize.return_value = "Summary"
-        mock_ses = MagicMock()
-        mock_ses.send_email.return_value = "msg-123"
+        mock_twilio = MagicMock()
+        mock_twilio.send_sms.return_value = "SM123"
 
         with (
             patch("src.handlers.webhook.get_user_repo", return_value=mock_user_repo),
             patch("src.handlers.webhook.get_meetings_repo", return_value=None),
             patch("src.handlers.webhook.get_calendar", return_value=mock_calendar),
             patch("src.handlers.webhook.get_anthropic", return_value=mock_anthropic),
-            patch("src.handlers.webhook.get_ses", return_value=mock_ses),
-            patch.dict("os.environ", {"RECIPIENT_EMAIL": "test@example.com"}),
+            patch("src.handlers.webhook.get_twilio", return_value=mock_twilio),
         ):
             result = _handle_successful_call(payload, "user-001")
 
@@ -365,23 +363,23 @@ class TestHandleSuccessfulCall:
 
         # Other mocks needed for successful flow
         mock_user_repo = MagicMock()
-        mock_user_repo.get_user_state.return_value = MagicMock(debrief_event_id=None)
+        mock_user_state = MagicMock(debrief_event_id=None, phone_number="+1234567890")
+        mock_user_repo.get_user_state.return_value = mock_user_state
         mock_anthropic = MagicMock()
         mock_anthropic.summarize.return_value = "Summary"
-        mock_ses = MagicMock()
-        mock_ses.send_email.return_value = "msg-123"
+        mock_twilio = MagicMock()
+        mock_twilio.send_sms.return_value = "SM123"
 
         with (
             patch("src.handlers.webhook.get_user_repo", return_value=mock_user_repo),
             patch("src.handlers.webhook.get_meetings_repo", return_value=None),
             patch("src.handlers.webhook.get_calendar", return_value=None),
             patch("src.handlers.webhook.get_anthropic", return_value=mock_anthropic),
-            patch("src.handlers.webhook.get_ses", return_value=mock_ses),
+            patch("src.handlers.webhook.get_twilio", return_value=mock_twilio),
             patch("src.handlers.webhook.get_transcripts_repo", return_value=mock_transcripts_repo),
             patch(
                 "src.handlers.webhook.get_resolution_service", return_value=mock_resolution_service
             ),
-            patch.dict("os.environ", {"RECIPIENT_EMAIL": "test@example.com"}),
         ):
             result = _handle_successful_call(payload, "user-001")
 
