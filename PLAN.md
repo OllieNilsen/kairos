@@ -600,25 +600,38 @@ kairos/
 
 ### Phase 2D: Prompt Sender Lambda (one-time schedule, no polling) ✅ COMPLETE
 - [x] Implement `prompt_sender.py`:
-  - Acquire idempotency `call-batch:{user_id}#{YYYY-MM-DD}`; if already exists → exit
+  - **SMS-first approach**: Send SMS prompt before calling
+  - Acquire idempotency `sms-send:{user_id}#{YYYY-MM-DD}`; if already exists → exit
   - Load pending meetings for today; if none → exit
-  - Directly initiate Bland call (SMS bypassed for MVP)
-  - Update `kairos-user-state` (`daily_call_made=true`, etc.)
-  - Note: SMS prompt bypassed; calling user directly
+  - Send SMS prompt via Twilio with meeting summary
+  - Update `kairos-user-state` (`prompts_sent_today`, `awaiting_reply=true`, etc.)
+  - For retries (after failed call): Directly initiate Bland call (skip SMS)
+  - Retry logic: Acquire `call-retry:{user_id}#{YYYY-MM-DD}#{retry_number}` idempotency
 
-### Phase 2E: Twilio 2-way SMS Webhook ⏸️ BLOCKED
-- [ ] Implement `twilio_sms.py`:
-  - send SMS
-  - verify inbound webhook signature
-- [ ] Implement `sms_webhook.py`:
-  - Verify signature
-  - Acquire `sms-in:{MessageSid}`; if already exists → exit
-  - Parse intent (YES/READY/NO/STOP/UNKNOWN)
-  - Update state
-  - On YES/READY: invoke `initiate_daily_call` (direct call or async invoke)
-- [ ] Add Lambda Function URL (or API Gateway) endpoint for Twilio inbound webhook
-- [ ] Configure Twilio messaging webhook URL
-- **STATUS**: Blocked - waiting for UK regulatory bundle and US A2P 10DLC registration
+### Phase 2E: Twilio 2-way SMS Webhook ✅ COMPLETE
+- [x] Implement `twilio_sms.py`:
+  - HTTP client for Twilio API with Basic Auth
+  - `send_sms()` for outbound messages
+  - `verify_twilio_signature()` for HMAC-SHA1 signature verification
+  - `build_twiml_response()` for generating TwiML XML responses
+  - `parse_twilio_webhook_body()` for URL-encoded webhook payloads
+- [x] Implement `sms_webhook.py`:
+  - Verify Twilio signature on all inbound requests
+  - Acquire `sms-in:{MessageSid}` idempotency; if already exists → exit
+  - Parse intent using **LLM-based classification** (AI-first approach):
+    - Uses `LLMClient` protocol (Anthropic Haiku for speed/cost)
+    - Structured JSON output validated by Pydantic
+    - Supports: YES, READY, NO, STOP, UNKNOWN
+    - Falls back to UNKNOWN on any error (fail-safe)
+  - Update user state based on intent
+  - On YES/READY: initiate Bland AI call directly
+  - On NO: set snooze until tomorrow
+  - On STOP: set stopped flag
+  - Returns TwiML XML response for all cases
+- [x] Add Lambda Function URL for Twilio inbound webhook
+- [x] Configure Twilio messaging webhook URL
+- [x] Add SSM parameters for Twilio credentials
+- [x] Grant IAM permissions for SSM access and DynamoDB operations
 
 ### Phase 2F: Call Initiation Lambda (one-call/day batching + retries) ✅ COMPLETE
 - [x] Merged into `prompt_sender.py`:
@@ -645,22 +658,26 @@ kairos/
   - If successful:
     - Mark `call_successful = true`
     - Mark meetings debriefed
-    - Send summary via email (SMS bypassed for MVP)
+    - Send summary via SMS (Twilio)
+    - Fallback to email if no phone number configured
     - Delete the debrief calendar event
   - Keep existing `call_id` webhook dedup logic
 
 ### Phase 2H: Testing & Polish ✅ COMPLETE
-- [x] Unit tests (196 tests):
-  - intent parsing
+- [x] Unit tests (391 tests):
+  - intent parsing (LLM-based classification)
   - budget rules
   - idempotency conditional writes
   - schedule reconciliation logic
+  - Twilio SMS adapter and webhook handler
   - All handlers and adapters covered
-- [ ] Integration tests (optional):
+  - 100% coverage of business logic
+- [ ] Integration tests (deferred):
   - "scheduler fires twice" → still only one call
   - "user moves event 3 times" → only one schedule exists and only one prompt max
+  - E2E testing plan documented for future implementation
 - [x] CloudWatch alarms for all Lambdas:
-  - webhook, trigger, calendar_webhook, prompt_sender, daily_plan
+  - webhook, trigger, calendar_webhook, prompt_sender, daily_plan, sms_webhook
 
 ---
 
