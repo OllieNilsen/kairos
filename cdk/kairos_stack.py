@@ -673,6 +673,12 @@ class KairosStack(Stack):
         # Grant calendar webhook access to user state table
         user_state_table.grant_read_write_data(calendar_webhook_fn)
 
+        # Slice 3: Grant calendar webhook access to knowledge graph tables
+        calendar_webhook_fn.add_environment("ENTITIES_TABLE", entities_table.table_name)
+        calendar_webhook_fn.add_environment("ALIASES_TABLE", entity_aliases_table.table_name)
+        entities_table.grant_read_write_data(calendar_webhook_fn)
+        entity_aliases_table.grant_read_write_data(calendar_webhook_fn)
+
         # Grant STS access for getting account ID
         calendar_webhook_fn.add_to_role_policy(
             iam.PolicyStatement(
