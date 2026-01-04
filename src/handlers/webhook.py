@@ -24,8 +24,8 @@ try:
     from adapters.scheduler import SchedulerClient, make_retry_schedule_name
     from adapters.ses import SESPublisher
     from adapters.ssm import get_parameter
-    from adapters.twilio_sms import TwilioClient
     from adapters.transcripts_repo import TranscriptsRepository
+    from adapters.twilio_sms import TwilioClient
     from adapters.user_state import UserStateRepository
     from adapters.webhook_verify import verify_bland_signature
     from core.extraction import EntityExtractor
@@ -45,8 +45,8 @@ except ImportError:
     from src.adapters.scheduler import SchedulerClient, make_retry_schedule_name
     from src.adapters.ses import SESPublisher
     from src.adapters.ssm import get_parameter
-    from src.adapters.twilio_sms import TwilioClient
     from src.adapters.transcripts_repo import TranscriptsRepository
+    from src.adapters.twilio_sms import TwilioClient
     from src.adapters.user_state import UserStateRepository
     from src.adapters.webhook_verify import verify_bland_signature
     from src.core.extraction import EntityExtractor
@@ -568,7 +568,7 @@ def _handle_successful_call(
             # Use call_id as meeting_id for transcript storage
             target_meeting_id = payload.call_id
 
-            transcripts_repo.save_transcript(user_id, target_meeting_id, segments)
+            transcripts_repo.save_transcript(user_id, target_meeting_id, payload.call_id, segments)
             logger.info("Saved transcript segments", extra={"count": len(segments)})
 
             # 2. Trigger Entity Resolution
@@ -601,7 +601,8 @@ def _handle_successful_call(
 
     # Send SMS notification (replaced email)
     twilio = get_twilio()
-    user_state = get_user_repo().get_user_state(user_id)
+    user_repo = get_user_repo()
+    user_state = user_repo.get_user_state(user_id) if user_repo else None
     if user_state and user_state.phone_number:
         # Format SMS: prefix + summary (SMS limit ~160 chars per segment)
         sms_body = f"📝 {prefix}{event_context.subject}\n\n{summary}"
