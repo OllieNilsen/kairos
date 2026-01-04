@@ -2,288 +2,316 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-from src.adapters.transcripts_repo import TranscriptsRepository
+from src.adapters.transcripts import TranscriptsRepository
 from src.core.models import TranscriptSegment
 
 
 class TestTranscriptsRepository:
     """Tests for TranscriptsRepository."""
 
-    @pytest.fixture
-    def mock_dynamodb(self) -> MagicMock:
-        """Create a mock DynamoDB table."""
-        mock_table = MagicMock()
-        return mock_table
-
-    @pytest.fixture
-    def repo(self, mock_dynamodb: MagicMock) -> TranscriptsRepository:
+    def _create_repo(self, mock_table: MagicMock) -> TranscriptsRepository:
         """Create repository with mocked DynamoDB."""
         with patch("boto3.resource") as mock_resource:
-            mock_resource.return_value.Table.return_value = mock_dynamodb
+            mock_resource.return_value.Table.return_value = mock_table
             repo = TranscriptsRepository("test-transcripts-table")
-            repo.table = mock_dynamodb
+            repo.table = mock_table
             return repo
 
-    @pytest.fixture
-    def sample_segments(self) -> list[TranscriptSegment]:
-        """Create sample transcript segments."""
-        return [
+    def test_save_transcript_writes_all_segments(self) -> None:
+        """Should save all transcript segments to DynamoDB."""
+        mock_table = MagicMock()
+        repo = self._create_repo(mock_table)
+
+        segments = [
+            TranscriptSegment(segment_id="seg_1", t0=0.0, t1=5.0, speaker="user", text="Hello"),
             TranscriptSegment(
-                segment_id="seg_0001",
-                t0=0.0,
-                t1=5.2,
-                speaker="user",
-                text="Hello, this is the first segment.",
-            ),
-            TranscriptSegment(
-                segment_id="seg_0002",
-                t0=5.2,
-                t1=10.5,
-                speaker="assistant",
-                text="This is the second segment from the assistant.",
-            ),
-            TranscriptSegment(
-                segment_id="seg_0003",
-                t0=10.5,
-                t1=15.0,
-                speaker="user",
-                text="And this is the third segment.",
+                segment_id="seg_2", t0=5.0, t1=10.0, speaker="assistant", text="Hi there"
             ),
         ]
 
-    def test_save_transcript(
-        self,
-        repo: TranscriptsRepository,
-        mock_dynamodb: MagicMock,
-        sample_segments: list[TranscriptSegment],
-    ) -> None:
-        """Should save transcript segments using batch writer."""
-        # Mock batch writer context manager
-        mock_batch = MagicMock()
-        mock_dynamodb.batch_writer.return_value.__enter__.return_value = mock_batch
+        repo.save_transcript("user-001", "meeting-123", "call-456", segments)
 
-        repo.save_transcript(
-            user_id="user-001",
-            meeting_id="meeting-123",
-            call_id="call-456",
-            segments=sample_segments,
-        )
+        # Should batch write all segments
+        mock_table.batch_writer.assert_called_once()
+        batch_writer = mock_table.batch_writer.return_value.__enter__.return_value
+        assert batch_writer.put_item.call_count == 2
 
-        # Verify batch writer was used
-        mock_dynamodb.batch_writer.assert_called_once()
+    def test_save_transcript_uses_correct_keys(self) -> None:
+        """Should use correct PK/SK format for DynamoDB."""
+        mock_table = MagicMock()
+        repo = self._create_repo(mock_table)
 
-        # Verify all segments were written
-        assert mock_batch.put_item.call_count == 3
+        segments = [
+            TranscriptSegment(segment_id="seg_1", t0=0.0, t1=5.0, speaker="user", text="Hello"),
+        ]
 
-        # Verify first segment structure
-        first_call = mock_batch.put_item.call_args_list[0]
-        item = first_call[1]["Item"]
-        assert item["pk"] == "USER#user-001#MEETING#meeting-123"
-        assert item["sk"] == "SEGMENT#seg_0001"
-        assert item["segment_id"] == "seg_0001"
-        assert item["t0"] == 0.0
-        assert item["t1"] == 5.2
-        assert item["speaker"] == "user"
-        assert item["text"] == "Hello, this is the first segment."
-        assert item["call_id"] == "call-456"
-        assert "created_at" in item
-        assert "ttl" in item
+        repo.save_transcript("user-001", "meeting-123", "call-456", segments)
 
-    def test_save_transcript_without_speaker(
-        self, repo: TranscriptsRepository, mock_dynamodb: MagicMock
-    ) -> None:
-        """Should handle segments without speaker field."""
-        mock_batch = MagicMock()
-        mock_dynamodb.batch_writer.return_value.__enter__.return_value = mock_batch
+        batch_writer = mock_table.batch_writer.return_value.__enter__.return_value
+        put_call = batch_writer.put_item.call_args[1]["Item"]
+
+        assert put_call["pk"] == "USER#user-001#MEETING#meeting-123"
+        assert put_call["sk"] == "SEGMENT#seg_1"
+
+    def test_save_transcript_stores_segment_data(self) -> None:
+        """Should store all segment fields correctly."""
+        mock_table = MagicMock()
+        repo = self._create_repo(mock_table)
 
         segments = [
             TranscriptSegment(
-                segment_id="seg_0001",
-                t0=0.0,
-                t1=5.0,
-                speaker=None,
-                text="Segment without speaker.",
-            )
+                segment_id="seg_42", t0=10.5, t1=15.3, speaker="user", text="Test message"
+            ),
         ]
 
-        repo.save_transcript(
-            user_id="user-001",
-            meeting_id="meeting-123",
-            call_id="call-456",
-            segments=segments,
-        )
+        repo.save_transcript("user-001", "meeting-123", "call-789", segments)
 
-        item = mock_batch.put_item.call_args[1]["Item"]
-        # Speaker should not be in item if None
-        assert "speaker" not in item
+        batch_writer = mock_table.batch_writer.return_value.__enter__.return_value
+        item = batch_writer.put_item.call_args[1]["Item"]
 
-    def test_get_transcript(self, repo: TranscriptsRepository, mock_dynamodb: MagicMock) -> None:
-        """Should retrieve all segments for a meeting sorted by t0."""
-        mock_dynamodb.query.return_value = {
+        assert item["segment_id"] == "seg_42"
+        assert item["t0"] == Decimal("10.5")
+        assert item["t1"] == Decimal("15.3")
+        assert item["speaker"] == "user"
+        assert item["text"] == "Test message"
+        assert item["call_id"] == "call-789"
+        assert item["meeting_id"] == "meeting-123"
+        assert item["user_id"] == "user-001"
+
+    def test_save_transcript_handles_empty_segments(self) -> None:
+        """Should handle empty segment list gracefully."""
+        mock_table = MagicMock()
+        repo = self._create_repo(mock_table)
+
+        repo.save_transcript("user-001", "meeting-123", "call-456", [])
+
+        # Should not call batch_writer if no segments
+        mock_table.batch_writer.assert_not_called()
+
+    def test_save_transcript_handles_null_speaker(self) -> None:
+        """Should handle segment with no speaker."""
+        mock_table = MagicMock()
+        repo = self._create_repo(mock_table)
+
+        segments = [
+            TranscriptSegment(segment_id="seg_1", t0=0.0, t1=5.0, speaker=None, text="Hello"),
+        ]
+
+        repo.save_transcript("user-001", "meeting-123", "call-456", segments)
+
+        batch_writer = mock_table.batch_writer.return_value.__enter__.return_value
+        item = batch_writer.put_item.call_args[1]["Item"]
+
+        assert item["speaker"] is None
+
+    def test_save_transcript_includes_ttl(self) -> None:
+        """Should include TTL for automatic expiration."""
+        mock_table = MagicMock()
+        repo = self._create_repo(mock_table)
+
+        segments = [
+            TranscriptSegment(segment_id="seg_1", t0=0.0, t1=5.0, speaker="user", text="Hello"),
+        ]
+
+        repo.save_transcript("user-001", "meeting-123", "call-456", segments)
+
+        batch_writer = mock_table.batch_writer.return_value.__enter__.return_value
+        item = batch_writer.put_item.call_args[1]["Item"]
+
+        # TTL should be set (90 days in the future)
+        assert "ttl" in item
+        now_ts = int(datetime.now(UTC).timestamp())
+        assert item["ttl"] > now_ts
+        assert item["ttl"] < now_ts + 100 * 86400  # Less than 100 days
+
+    def test_get_transcript_returns_all_segments(self) -> None:
+        """Should return all segments for a meeting."""
+        mock_table = MagicMock()
+        repo = self._create_repo(mock_table)
+
+        mock_table.query.return_value = {
             "Items": [
                 {
                     "pk": "USER#user-001#MEETING#meeting-123",
-                    "sk": "SEGMENT#seg_0002",
-                    "segment_id": "seg_0002",
-                    "t0": 5.2,
-                    "t1": 10.5,
-                    "speaker": "assistant",
-                    "text": "Second segment.",
-                },
-                {
-                    "pk": "USER#user-001#MEETING#meeting-123",
-                    "sk": "SEGMENT#seg_0001",
-                    "segment_id": "seg_0001",
-                    "t0": 0.0,
-                    "t1": 5.2,
+                    "sk": "SEGMENT#seg_1",
+                    "segment_id": "seg_1",
+                    "t0": Decimal("0.0"),
+                    "t1": Decimal("5.0"),
                     "speaker": "user",
-                    "text": "First segment.",
+                    "text": "Hello",
                 },
                 {
                     "pk": "USER#user-001#MEETING#meeting-123",
-                    "sk": "SEGMENT#seg_0003",
-                    "segment_id": "seg_0003",
-                    "t0": 10.5,
-                    "t1": 15.0,
-                    "text": "Third segment (no speaker).",
+                    "sk": "SEGMENT#seg_2",
+                    "segment_id": "seg_2",
+                    "t0": Decimal("5.0"),
+                    "t1": Decimal("10.0"),
+                    "speaker": "assistant",
+                    "text": "Hi there",
                 },
             ]
         }
 
         segments = repo.get_transcript("user-001", "meeting-123")
 
-        # Verify query was called correctly
-        mock_dynamodb.query.assert_called_once()
-        call_args = mock_dynamodb.query.call_args[1]
-        assert ":pk" in call_args["ExpressionAttributeValues"]
-        assert call_args["ExpressionAttributeValues"][":pk"] == "USER#user-001#MEETING#meeting-123"
+        assert len(segments) == 2
+        assert segments[0].segment_id == "seg_1"
+        assert segments[0].text == "Hello"
+        assert segments[1].segment_id == "seg_2"
+        assert segments[1].text == "Hi there"
 
-        # Verify segments are sorted by t0
-        assert len(segments) == 3
-        assert segments[0].segment_id == "seg_0001"
-        assert segments[0].t0 == 0.0
-        assert segments[1].segment_id == "seg_0002"
-        assert segments[1].t0 == 5.2
-        assert segments[2].segment_id == "seg_0003"
-        assert segments[2].t0 == 10.5
+    def test_get_transcript_returns_empty_list_when_not_found(self) -> None:
+        """Should return empty list when no transcript exists."""
+        mock_table = MagicMock()
+        repo = self._create_repo(mock_table)
 
-        # Verify segment without speaker is handled
-        assert segments[2].speaker is None
-
-    def test_get_transcript_empty(
-        self, repo: TranscriptsRepository, mock_dynamodb: MagicMock
-    ) -> None:
-        """Should return empty list when no segments found."""
-        mock_dynamodb.query.return_value = {"Items": []}
+        mock_table.query.return_value = {"Items": []}
 
         segments = repo.get_transcript("user-001", "nonexistent")
 
-        assert segments == []
+        assert len(segments) == 0
 
-    def test_get_segment_found(self, repo: TranscriptsRepository, mock_dynamodb: MagicMock) -> None:
-        """Should retrieve a specific segment by ID."""
-        mock_dynamodb.get_item.return_value = {
+    def test_get_transcript_sorts_by_t0(self) -> None:
+        """Should return segments sorted by start time."""
+        mock_table = MagicMock()
+        repo = self._create_repo(mock_table)
+
+        # Return items out of order
+        mock_table.query.return_value = {
+            "Items": [
+                {
+                    "pk": "USER#user-001#MEETING#meeting-123",
+                    "sk": "SEGMENT#seg_2",
+                    "segment_id": "seg_2",
+                    "t0": Decimal("5.0"),
+                    "t1": Decimal("10.0"),
+                    "speaker": "user",
+                    "text": "Second",
+                },
+                {
+                    "pk": "USER#user-001#MEETING#meeting-123",
+                    "sk": "SEGMENT#seg_1",
+                    "segment_id": "seg_1",
+                    "t0": Decimal("0.0"),
+                    "t1": Decimal("5.0"),
+                    "speaker": "user",
+                    "text": "First",
+                },
+            ]
+        }
+
+        segments = repo.get_transcript("user-001", "meeting-123")
+
+        assert segments[0].text == "First"
+        assert segments[1].text == "Second"
+
+    def test_get_segment_returns_segment_when_found(self) -> None:
+        """Should return a specific segment by ID."""
+        mock_table = MagicMock()
+        repo = self._create_repo(mock_table)
+
+        mock_table.get_item.return_value = {
             "Item": {
                 "pk": "USER#user-001#MEETING#meeting-123",
-                "sk": "SEGMENT#seg_0001",
-                "segment_id": "seg_0001",
-                "t0": 0.0,
-                "t1": 5.2,
-                "speaker": "user",
-                "text": "Test segment.",
+                "sk": "SEGMENT#seg_42",
+                "segment_id": "seg_42",
+                "t0": Decimal("10.5"),
+                "t1": Decimal("15.0"),
+                "speaker": "assistant",
+                "text": "Found it",
             }
         }
 
-        segment = repo.get_segment("user-001", "meeting-123", "seg_0001")
+        segment = repo.get_segment("user-001", "meeting-123", "seg_42")
 
         assert segment is not None
-        assert segment.segment_id == "seg_0001"
-        assert segment.t0 == 0.0
-        assert segment.t1 == 5.2
-        assert segment.speaker == "user"
-        assert segment.text == "Test segment."
+        assert segment.segment_id == "seg_42"
+        assert segment.t0 == 10.5
+        assert segment.t1 == 15.0
+        assert segment.speaker == "assistant"
+        assert segment.text == "Found it"
 
-        # Verify get_item was called with correct keys
-        mock_dynamodb.get_item.assert_called_once()
-        call_args = mock_dynamodb.get_item.call_args[1]
-        assert call_args["Key"]["pk"] == "USER#user-001#MEETING#meeting-123"
-        assert call_args["Key"]["sk"] == "SEGMENT#seg_0001"
-
-    def test_get_segment_not_found(
-        self, repo: TranscriptsRepository, mock_dynamodb: MagicMock
-    ) -> None:
+    def test_get_segment_returns_none_when_not_found(self) -> None:
         """Should return None when segment not found."""
-        mock_dynamodb.get_item.return_value = {}
+        mock_table = MagicMock()
+        repo = self._create_repo(mock_table)
+
+        mock_table.get_item.return_value = {}
 
         segment = repo.get_segment("user-001", "meeting-123", "nonexistent")
 
         assert segment is None
 
-    def test_item_to_segment(self, repo: TranscriptsRepository) -> None:
-        """Should correctly convert DynamoDB item to TranscriptSegment."""
-        item = {
-            "pk": "USER#user-001#MEETING#meeting-123",
-            "sk": "SEGMENT#seg_0001",
-            "segment_id": "seg_0001",
-            "t0": 0.0,
-            "t1": 5.2,
-            "speaker": "user",
-            "text": "Test segment.",
-        }
+    def test_get_segment_uses_correct_key(self) -> None:
+        """Should use correct PK/SK for get_item."""
+        mock_table = MagicMock()
+        repo = self._create_repo(mock_table)
 
-        segment = repo._item_to_segment(item)
+        mock_table.get_item.return_value = {}
 
-        assert segment.segment_id == "seg_0001"
-        assert segment.t0 == 0.0
-        assert segment.t1 == 5.2
-        assert segment.speaker == "user"
-        assert segment.text == "Test segment."
+        repo.get_segment("user-001", "meeting-123", "seg_5")
 
-    def test_item_to_segment_without_speaker(self, repo: TranscriptsRepository) -> None:
-        """Should handle items without speaker field."""
-        item = {
-            "pk": "USER#user-001#MEETING#meeting-123",
-            "sk": "SEGMENT#seg_0001",
-            "segment_id": "seg_0001",
-            "t0": 0.0,
-            "t1": 5.2,
-            "text": "Segment without speaker.",
-        }
-
-        segment = repo._item_to_segment(item)
-
-        assert segment.segment_id == "seg_0001"
-        assert segment.speaker is None
-        assert segment.text == "Segment without speaker."
-
-    def test_save_transcript_idempotency(
-        self,
-        repo: TranscriptsRepository,
-        mock_dynamodb: MagicMock,
-        sample_segments: list[TranscriptSegment],
-    ) -> None:
-        """Should be idempotent - saving same segments twice should overwrite."""
-        mock_batch = MagicMock()
-        mock_dynamodb.batch_writer.return_value.__enter__.return_value = mock_batch
-
-        # Save twice with same call_id
-        repo.save_transcript(
-            user_id="user-001",
-            meeting_id="meeting-123",
-            call_id="call-456",
-            segments=sample_segments,
+        mock_table.get_item.assert_called_once_with(
+            Key={
+                "pk": "USER#user-001#MEETING#meeting-123",
+                "sk": "SEGMENT#seg_5",
+            }
         )
 
-        repo.save_transcript(
-            user_id="user-001",
-            meeting_id="meeting-123",
-            call_id="call-456",
-            segments=sample_segments,
-        )
+    def test_delete_transcript_removes_all_segments(self) -> None:
+        """Should delete all segments for a meeting."""
+        mock_table = MagicMock()
+        repo = self._create_repo(mock_table)
 
-        # Both saves should succeed (DynamoDB put_item overwrites)
-        assert mock_batch.put_item.call_count == 6  # 3 segments × 2 saves
+        # Mock query to return existing segments
+        mock_table.query.return_value = {
+            "Items": [
+                {"pk": "USER#user-001#MEETING#meeting-123", "sk": "SEGMENT#seg_1"},
+                {"pk": "USER#user-001#MEETING#meeting-123", "sk": "SEGMENT#seg_2"},
+            ]
+        }
+
+        repo.delete_transcript("user-001", "meeting-123")
+
+        # Should batch delete all segments
+        mock_table.batch_writer.assert_called_once()
+        batch_writer = mock_table.batch_writer.return_value.__enter__.return_value
+        assert batch_writer.delete_item.call_count == 2
+
+    def test_delete_transcript_handles_empty_transcript(self) -> None:
+        """Should handle deletion of non-existent transcript gracefully."""
+        mock_table = MagicMock()
+        repo = self._create_repo(mock_table)
+
+        mock_table.query.return_value = {"Items": []}
+
+        repo.delete_transcript("user-001", "nonexistent")
+
+        # Should not call batch_writer if nothing to delete
+        mock_table.batch_writer.assert_not_called()
+
+    def test_transcript_exists_returns_true_when_exists(self) -> None:
+        """Should return True when transcript exists."""
+        mock_table = MagicMock()
+        repo = self._create_repo(mock_table)
+
+        mock_table.query.return_value = {"Count": 1}
+
+        exists = repo.transcript_exists("user-001", "meeting-123")
+
+        assert exists is True
+
+    def test_transcript_exists_returns_false_when_not_exists(self) -> None:
+        """Should return False when transcript doesn't exist."""
+        mock_table = MagicMock()
+        repo = self._create_repo(mock_table)
+
+        mock_table.query.return_value = {"Count": 0}
+
+        exists = repo.transcript_exists("user-001", "meeting-123")
+
+        assert exists is False
