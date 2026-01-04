@@ -254,7 +254,9 @@ class TestHandleSuccessfulCall:
         payload.variables = {}
         payload.concatenated_transcript = "Test transcript"
 
-        user_state = UserState(user_id="user-001", debrief_event_id="event-123", phone_number="+1234567890")
+        user_state = UserState(
+            user_id="user-001", debrief_event_id="event-123", phone_number="+1234567890"
+        )
         mock_user_repo = MagicMock()
         mock_user_repo.get_user_state.return_value = user_state
 
@@ -286,7 +288,9 @@ class TestHandleSuccessfulCall:
         payload.variables = {}
         payload.concatenated_transcript = "Test transcript"
 
-        user_state = UserState(user_id="user-001", debrief_event_id="event-123", phone_number="+1234567890")
+        user_state = UserState(
+            user_id="user-001", debrief_event_id="event-123", phone_number="+1234567890"
+        )
         mock_user_repo = MagicMock()
         mock_user_repo.get_user_state.return_value = user_state
 
@@ -320,7 +324,9 @@ class TestHandleSuccessfulCall:
         payload.variables = {}
         payload.concatenated_transcript = "Test transcript"
 
-        user_state = UserState(user_id="user-001", debrief_event_id=None, phone_number="+1234567890")
+        user_state = UserState(
+            user_id="user-001", debrief_event_id=None, phone_number="+1234567890"
+        )
         mock_user_repo = MagicMock()
         mock_user_repo.get_user_state.return_value = user_state
 
@@ -385,10 +391,12 @@ class TestHandleSuccessfulCall:
 
         # Verify functionality
         mock_transcripts_repo.save_transcript.assert_called_once()
-        # Verify arguments: user_id, meeting_id (call_id), segments
+        # Verify arguments: user_id, meeting_id, call_id, segments
         args = mock_transcripts_repo.save_transcript.call_args
-        assert args[0][0] == "user-001"
-        assert args[0][1] == "call-123"
+        assert args[0][0] == "user-001"  # user_id
+        assert args[0][1] == "call-123"  # meeting_id
+        assert args[0][2] == "call-123"  # call_id
+        assert len(args[0][3]) == 1  # segments
 
         mock_resolution_service.process_meeting.assert_called_once_with("user-001", "call-123")
 
