@@ -356,7 +356,11 @@ def extract_attendees(event: dict[str, Any]) -> list[AttendeeInfo]:
         List of AttendeeInfo objects (excluding the calendar owner)
     """
     # Import here to avoid circular dependency
-    from src.core.models import AttendeeInfo
+    # Support both Lambda (core.*) and test (src.core.*) import paths
+    try:
+        from core.models import AttendeeInfo
+    except ImportError:
+        from src.core.models import AttendeeInfo
 
     attendees = event.get("attendees", [])
     result = []

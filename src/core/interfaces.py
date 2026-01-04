@@ -7,13 +7,23 @@ from typing import TYPE_CHECKING, Protocol, TypeVar
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
-    from src.core.models import (
-        CandidateScore,
-        Entity,
-        EntityType,
-        Mention,
-        TranscriptSegment,
-    )
+    # Support both Lambda and test import paths
+    try:
+        from core.models import (
+            CandidateScore,
+            Entity,
+            EntityType,
+            Mention,
+            TranscriptSegment,
+        )
+    except ImportError:
+        from src.core.models import (
+            CandidateScore,
+            Entity,
+            EntityType,
+            Mention,
+            TranscriptSegment,
+        )
 
 T = TypeVar("T", bound=BaseModel)
 

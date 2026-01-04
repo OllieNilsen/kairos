@@ -125,13 +125,16 @@ class KairosStack(Stack):
             )
         )
 
-        # Grant SSM read access for Anthropic API key and webhook secret
+        # Grant SSM read access for Anthropic API key, webhook secret, and Twilio credentials
         webhook_fn.add_to_role_policy(
             iam.PolicyStatement(
                 actions=["ssm:GetParameter"],
                 resources=[
                     f"arn:aws:ssm:{self.region}:{self.account}:parameter{SSM_ANTHROPIC_API_KEY}",
                     f"arn:aws:ssm:{self.region}:{self.account}:parameter{SSM_BLAND_WEBHOOK_SECRET}",
+                    f"arn:aws:ssm:{self.region}:{self.account}:parameter{SSM_TWILIO_ACCOUNT_SID}",
+                    f"arn:aws:ssm:{self.region}:{self.account}:parameter{SSM_TWILIO_AUTH_TOKEN}",
+                    f"arn:aws:ssm:{self.region}:{self.account}:parameter{SSM_TWILIO_FROM_NUMBER}",
                 ],
             )
         )
@@ -598,6 +601,9 @@ class KairosStack(Stack):
             **{k: v for k, v in common_lambda_props.items() if k != "timeout"},
         )
 
+        # Add calendar webhook URL for push notification setup
+        daily_plan_fn.add_environment("CALENDAR_WEBHOOK_URL", calendar_webhook_url.url)
+
         # Grant DynamoDB access
         user_state_table.grant_read_write_data(daily_plan_fn)
         idempotency_table.grant_read_write_data(daily_plan_fn)
@@ -662,6 +668,7 @@ class KairosStack(Stack):
         calendar_webhook_fn.add_environment("USER_STATE_TABLE", user_state_table.table_name)
         calendar_webhook_fn.add_environment("SCHEDULER_ROLE_ARN", scheduler_role.role_arn)
         calendar_webhook_fn.add_environment("PROMPT_SENDER_FUNCTION_NAME", "kairos-prompt-sender")
+        calendar_webhook_fn.add_environment("USER_ID", "user-001")  # MVP: single user
 
         # Grant calendar webhook access to user state table
         user_state_table.grant_read_write_data(calendar_webhook_fn)

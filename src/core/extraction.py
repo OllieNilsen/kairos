@@ -8,13 +8,27 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
-    from src.core.interfaces import LLMClient
-from src.core.models import (
-    MentionExtraction,
-    TranscriptSegment,
-    VerificationResult,
-    normalize_text,
-)
+    # Support both Lambda and test import paths
+    try:
+        from core.interfaces import LLMClient
+    except ImportError:
+        from src.core.interfaces import LLMClient
+
+# Support both Lambda and test import paths
+try:
+    from core.models import (
+        MentionExtraction,
+        TranscriptSegment,
+        VerificationResult,
+        normalize_text,
+    )
+except ImportError:
+    from src.core.models import (
+        MentionExtraction,
+        TranscriptSegment,
+        VerificationResult,
+        normalize_text,
+    )
 
 logger = logging.getLogger(__name__)
 

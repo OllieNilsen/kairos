@@ -68,7 +68,9 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
 
     # 1. Acquire daily lease to prevent duplicate runs
     lease = DailyLease(IDEMPOTENCY_TABLE, region=AWS_REGION)
-    if not lease.try_acquire("daily-plan", MVP_USER_ID, today_str):
+    lease_key = DailyLease.make_key("daily-plan", MVP_USER_ID, today_str)
+    request_id = getattr(context, "aws_request_id", "local-test")
+    if not lease.try_acquire(lease_key, request_id):
         logger.info("Daily plan already executed for today")
         return {
             "statusCode": 200,
@@ -167,6 +169,60 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             debrief_event_etag = created.get("etag")
             logger.info("Created new debrief event", extra={"event_id": debrief_event_id})
 
+        # 4b. Set up/renew Google Calendar push notifications
+        calendar_webhook_url = os.environ.get("CALENDAR_WEBHOOK_URL", "")
+        channel_id = None
+        channel_expiry = None
+
+        if calendar_webhook_url:
+            # Check if we need to (re)create the watch
+            need_watch = True
+            if user_state and user_state.google_channel_id and user_state.google_channel_expiry:
+                # Parse expiry and check if still valid (with 1 day buffer)
+                try:
+                    expiry_dt = datetime.fromisoformat(
+                        user_state.google_channel_expiry.replace("Z", "+00:00")
+                    )
+                    if expiry_dt > now + timedelta(days=1):
+                        need_watch = False
+                        logger.info(
+                            "Calendar watch still valid",
+                            extra={"expiry": user_state.google_channel_expiry},
+                        )
+                except (ValueError, AttributeError):
+                    pass  # Invalid expiry, will recreate
+
+            if need_watch:
+                import uuid
+
+                channel_id = str(uuid.uuid4())
+                try:
+                    watch_result = calendar.watch_calendar(
+                        webhook_url=calendar_webhook_url,
+                        channel_id=channel_id,
+                    )
+                    # Google returns expiration as milliseconds since epoch
+                    expiration_ms = int(watch_result.get("expiration", 0))
+                    if expiration_ms:
+                        channel_expiry = datetime.fromtimestamp(
+                            expiration_ms / 1000, tz=ZoneInfo("UTC")
+                        ).isoformat()
+                    logger.info(
+                        "Created calendar watch",
+                        extra={
+                            "channel_id": channel_id,
+                            "resource_id": watch_result.get("resourceId"),
+                            "expiry": channel_expiry,
+                        },
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to create calendar watch",
+                        extra={"error": str(e)},
+                    )
+                    channel_id = None
+                    channel_expiry = None
+
         # 5. Schedule one-time prompt sender trigger
         schedule_name = make_prompt_schedule_name(MVP_USER_ID, today_str)
 
@@ -195,6 +251,8 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             prompt_schedule_name=schedule_name,
             debrief_event_id=debrief_event_id,
             debrief_event_etag=debrief_event_etag,
+            google_channel_id=channel_id,
+            google_channel_expiry=channel_expiry,
         )
         logger.info("Reset daily state", extra={"user_id": MVP_USER_ID})
 
@@ -219,5 +277,5 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     except Exception:
         logger.exception("Daily planning failed")
         # Release lease so it can be retried
-        lease.release("daily-plan", MVP_USER_ID, today_str)
+        lease.release(lease_key, request_id)
         raise

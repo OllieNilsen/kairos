@@ -6,21 +6,39 @@ import logging
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from src.core.models import (
-    Mention,
-    MentionEvidence,
-    MentionExtraction,
-    ResolutionState,
-    TranscriptSegment,
-)
+# Support both Lambda and test import paths
+try:
+    from core.models import (
+        Mention,
+        MentionEvidence,
+        MentionExtraction,
+        ResolutionState,
+        TranscriptSegment,
+    )
+except ImportError:
+    from src.core.models import (
+        Mention,
+        MentionEvidence,
+        MentionExtraction,
+        ResolutionState,
+        TranscriptSegment,
+    )
 
 if TYPE_CHECKING:
-    from src.core.extraction import EntityExtractor
-    from src.core.interfaces import (
-        EntitiesRepositoryProtocol,
-        MentionsRepositoryProtocol,
-        TranscriptsRepositoryProtocol,
-    )
+    try:
+        from core.extraction import EntityExtractor
+        from core.interfaces import (
+            EntitiesRepositoryProtocol,
+            MentionsRepositoryProtocol,
+            TranscriptsRepositoryProtocol,
+        )
+    except ImportError:
+        from src.core.extraction import EntityExtractor
+        from src.core.interfaces import (
+            EntitiesRepositoryProtocol,
+            MentionsRepositoryProtocol,
+            TranscriptsRepositoryProtocol,
+        )
 
 logger = logging.getLogger(__name__)
 

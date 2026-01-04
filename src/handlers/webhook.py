@@ -24,6 +24,7 @@ try:
     from adapters.scheduler import SchedulerClient, make_retry_schedule_name
     from adapters.ses import SESPublisher
     from adapters.ssm import get_parameter
+    from adapters.twilio_sms import TwilioClient
     from adapters.transcripts_repo import TranscriptsRepository
     from adapters.user_state import UserStateRepository
     from adapters.webhook_verify import verify_bland_signature
@@ -44,6 +45,7 @@ except ImportError:
     from src.adapters.scheduler import SchedulerClient, make_retry_schedule_name
     from src.adapters.ses import SESPublisher
     from src.adapters.ssm import get_parameter
+    from src.adapters.twilio_sms import TwilioClient
     from src.adapters.transcripts_repo import TranscriptsRepository
     from src.adapters.user_state import UserStateRepository
     from src.adapters.webhook_verify import verify_bland_signature
@@ -91,6 +93,12 @@ VOICEMAIL_KEYWORDS = [
 # Lazy initialization for cold start optimization
 _anthropic: AnthropicSummarizer | None = None
 _ses: SESPublisher | None = None
+_twilio: TwilioClient | None = None
+
+# SSM parameter names for Twilio
+SSM_TWILIO_ACCOUNT_SID = "/kairos/twilio-account-sid"
+SSM_TWILIO_AUTH_TOKEN = "/kairos/twilio-auth-token"
+SSM_TWILIO_FROM_NUMBER = "/kairos/twilio-from-number"
 _deduplicator: CallDeduplicator | None = None
 _user_repo: UserStateRepository | None = None
 _retry_dedup: CallRetryDedup | None = None
@@ -123,6 +131,17 @@ def get_ses() -> SESPublisher:
         sender_email = os.environ["SENDER_EMAIL"]
         _ses = SESPublisher(sender_email)
     return _ses
+
+
+def get_twilio() -> TwilioClient:
+    """Get or create the Twilio client."""
+    global _twilio
+    if _twilio is None:
+        account_sid = get_parameter(SSM_TWILIO_ACCOUNT_SID)
+        auth_token = get_parameter(SSM_TWILIO_AUTH_TOKEN)
+        from_number = get_parameter(SSM_TWILIO_FROM_NUMBER)
+        _twilio = TwilioClient(account_sid, auth_token, from_number)
+    return _twilio
 
 
 def get_deduplicator() -> CallDeduplicator | None:
@@ -580,20 +599,33 @@ def _handle_successful_call(
     )
     logger.info("Generated summary", extra={"length": len(summary), "summary": summary})
 
-    # Send email notification
-    ses = get_ses()
-    recipient_email = os.environ["RECIPIENT_EMAIL"]
-    subject = f"{prefix}Kairos Debrief: {event_context.subject}"
-    message_id = ses.send_email(
-        to_email=recipient_email,
-        subject=subject,
-        body=summary,
-    )
-    logger.info("Sent email", extra={"message_id": message_id})
+    # Send SMS notification (replaced email)
+    twilio = get_twilio()
+    user_state = get_user_repo().get_user_state(user_id)
+    if user_state and user_state.phone_number:
+        # Format SMS: prefix + summary (SMS limit ~160 chars per segment)
+        sms_body = f"📝 {prefix}{event_context.subject}\n\n{summary}"
+        message_sid = twilio.send_sms(user_state.phone_number, sms_body)
+        logger.info("Sent SMS summary", extra={"message_sid": message_sid})
+    else:
+        # Fallback to email if no phone number
+        ses = get_ses()
+        recipient_email = os.environ["RECIPIENT_EMAIL"]
+        subject = f"{prefix}Kairos Debrief: {event_context.subject}"
+        message_id = ses.send_email(
+            to_email=recipient_email,
+            subject=subject,
+            body=summary,
+        )
+        logger.info("Sent email (no phone)", extra={"message_id": message_id})
+        return {
+            "statusCode": 200,
+            "body": json.dumps({"status": "processed", "message_id": message_id}),
+        }
 
     return {
         "statusCode": 200,
-        "body": json.dumps({"status": "processed", "message_id": message_id}),
+        "body": json.dumps({"status": "processed", "message_sid": message_sid}),
     }
 
 

@@ -8,7 +8,11 @@ import anthropic
 from anthropic.types import TextBlock, ToolUseBlock
 from pydantic import BaseModel
 
-from src.core.interfaces import LLMClient
+# Support both Lambda and test import paths
+try:
+    from core.interfaces import LLMClient
+except ImportError:
+    from src.core.interfaces import LLMClient
 
 T = TypeVar("T", bound=BaseModel)
 
