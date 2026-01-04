@@ -349,3 +349,169 @@ class TestHandleDebriefMoved:
             )
 
         assert result["debrief_action"] == "reschedule_failed"
+
+
+class TestEntityAutoCreation:
+    """Tests for entity auto-creation from calendar attendees (Slice 3)."""
+
+    @pytest.fixture
+    def mock_event_with_attendees(self) -> dict:
+        """Create a mock Google Calendar event with attendees."""
+        tomorrow = datetime.now(UTC) + timedelta(days=1)
+        return {
+            "id": "meeting-with-attendees",
+            "status": "confirmed",
+            "etag": "etag-123",
+            "summary": "Team Meeting",
+            "start": {"dateTime": tomorrow.isoformat()},
+            "end": {"dateTime": (tomorrow + timedelta(hours=1)).isoformat()},
+            "attendees": [
+                {"email": "alice@example.com", "displayName": "Alice Smith"},
+                {"email": "bob@example.com", "displayName": "Bob Jones"},
+                {"displayName": "Charlie (External)"},  # No email
+            ],
+        }
+
+    def test_creates_entities_for_attendees_with_emails(
+        self, mock_event_with_attendees: dict
+    ) -> None:
+        """Should create resolved entities for attendees with emails."""
+        from src.handlers.calendar_webhook import sync_calendar_events
+
+        mock_meetings_repo = MagicMock()
+        mock_meetings_repo.get_meeting.return_value = None
+        mock_calendar = MagicMock()
+        mock_calendar.list_events.return_value = [mock_event_with_attendees]
+
+        # Mock entities repo
+        mock_entities_repo = MagicMock()
+        mock_entity_alice = MagicMock(entity_id="entity-alice")
+        mock_entity_bob = MagicMock(entity_id="entity-bob")
+        mock_entities_repo.get_or_create_by_email.side_effect = [
+            mock_entity_alice,
+            mock_entity_bob,
+        ]
+
+        with (
+            patch.dict("os.environ", {"USER_ID": "user-001"}, clear=False),
+            patch(
+                "src.handlers.calendar_webhook.get_meetings_repo", return_value=mock_meetings_repo
+            ),
+            patch("src.handlers.calendar_webhook.get_calendar_client", return_value=mock_calendar),
+            patch(
+                "src.handlers.calendar_webhook.get_entities_repo", return_value=mock_entities_repo
+            ),
+            patch("src.handlers.calendar_webhook.get_user_state_repo", return_value=None),
+            patch("src.handlers.calendar_webhook.check_debrief_event_changes", return_value={}),
+        ):
+            result = sync_calendar_events()
+
+        # Verify entities were created for attendees with emails
+        assert mock_entities_repo.get_or_create_by_email.call_count == 2
+        mock_entities_repo.get_or_create_by_email.assert_any_call(
+            "user-001", "alice@example.com", "Alice Smith"
+        )
+        mock_entities_repo.get_or_create_by_email.assert_any_call(
+            "user-001", "bob@example.com", "Bob Jones"
+        )
+
+        # Verify meeting was saved with entity IDs
+        mock_meetings_repo.save_meeting.assert_called_once()
+        saved_meeting = mock_meetings_repo.save_meeting.call_args[0][0]
+        assert saved_meeting.attendee_entity_ids == ["entity-alice", "entity-bob"]
+        assert result["synced"] == 1
+
+    def test_skips_attendees_without_emails(self, mock_event_with_attendees: dict) -> None:
+        """Should skip attendees without email addresses."""
+        from src.handlers.calendar_webhook import sync_calendar_events
+
+        mock_meetings_repo = MagicMock()
+        mock_meetings_repo.get_meeting.return_value = None
+        mock_calendar = MagicMock()
+        mock_calendar.list_events.return_value = [mock_event_with_attendees]
+
+        mock_entities_repo = MagicMock()
+        mock_entities_repo.get_or_create_by_email.return_value = MagicMock(entity_id="entity-123")
+
+        with (
+            patch.dict("os.environ", {"USER_ID": "user-001"}, clear=False),
+            patch(
+                "src.handlers.calendar_webhook.get_meetings_repo", return_value=mock_meetings_repo
+            ),
+            patch("src.handlers.calendar_webhook.get_calendar_client", return_value=mock_calendar),
+            patch(
+                "src.handlers.calendar_webhook.get_entities_repo", return_value=mock_entities_repo
+            ),
+            patch("src.handlers.calendar_webhook.get_user_state_repo", return_value=None),
+            patch("src.handlers.calendar_webhook.check_debrief_event_changes", return_value={}),
+        ):
+            sync_calendar_events()
+
+        # Should only call for attendees with emails (Alice and Bob, not Charlie)
+        assert mock_entities_repo.get_or_create_by_email.call_count == 2
+
+    def test_graceful_degradation_when_entity_creation_fails(
+        self, mock_event_with_attendees: dict
+    ) -> None:
+        """Should continue with meeting sync even if entity creation fails."""
+        from src.handlers.calendar_webhook import sync_calendar_events
+
+        mock_meetings_repo = MagicMock()
+        mock_meetings_repo.get_meeting.return_value = None
+        mock_calendar = MagicMock()
+        mock_calendar.list_events.return_value = [mock_event_with_attendees]
+
+        # Mock entities repo to raise an exception
+        mock_entities_repo = MagicMock()
+        mock_entities_repo.get_or_create_by_email.side_effect = Exception("DynamoDB error")
+
+        with (
+            patch.dict("os.environ", {"USER_ID": "user-001"}, clear=False),
+            patch(
+                "src.handlers.calendar_webhook.get_meetings_repo", return_value=mock_meetings_repo
+            ),
+            patch("src.handlers.calendar_webhook.get_calendar_client", return_value=mock_calendar),
+            patch(
+                "src.handlers.calendar_webhook.get_entities_repo", return_value=mock_entities_repo
+            ),
+            patch("src.handlers.calendar_webhook.get_user_state_repo", return_value=None),
+            patch("src.handlers.calendar_webhook.check_debrief_event_changes", return_value={}),
+        ):
+            result = sync_calendar_events()
+
+        # Meeting should still be saved despite entity creation failure
+        mock_meetings_repo.save_meeting.assert_called_once()
+        saved_meeting = mock_meetings_repo.save_meeting.call_args[0][0]
+        # attendee_entity_ids should be empty due to failure
+        assert saved_meeting.attendee_entity_ids == []
+        assert result["synced"] == 1
+
+    def test_syncs_meetings_without_entities_repo(self, mock_event_with_attendees: dict) -> None:
+        """Should sync meetings normally when entities repo not configured."""
+        from src.handlers.calendar_webhook import sync_calendar_events
+
+        mock_meetings_repo = MagicMock()
+        mock_meetings_repo.get_meeting.return_value = None
+        mock_calendar = MagicMock()
+        mock_calendar.list_events.return_value = [mock_event_with_attendees]
+
+        with (
+            patch.dict("os.environ", {"USER_ID": "user-001"}, clear=False),
+            patch(
+                "src.handlers.calendar_webhook.get_meetings_repo", return_value=mock_meetings_repo
+            ),
+            patch("src.handlers.calendar_webhook.get_calendar_client", return_value=mock_calendar),
+            patch(
+                "src.handlers.calendar_webhook.get_entities_repo", return_value=None
+            ),  # No entities repo
+            patch("src.handlers.calendar_webhook.get_user_state_repo", return_value=None),
+            patch("src.handlers.calendar_webhook.check_debrief_event_changes", return_value={}),
+        ):
+            result = sync_calendar_events()
+
+        # Meeting should still be saved
+        mock_meetings_repo.save_meeting.assert_called_once()
+        saved_meeting = mock_meetings_repo.save_meeting.call_args[0][0]
+        # attendee_entity_ids should be empty (default)
+        assert saved_meeting.attendee_entity_ids == []
+        assert result["synced"] == 1

@@ -12,6 +12,7 @@ from aws_lambda_powertools import Logger
 
 # Support both Lambda (adapters...) and test (src.adapters...) import paths
 try:
+    from adapters.entities_repo import EntitiesRepository
     from adapters.google_calendar import (
         GoogleCalendarClient,
         extract_attendees,
@@ -22,6 +23,7 @@ try:
     from adapters.user_state import UserStateRepository
     from core.models import Meeting
 except ImportError:
+    from src.adapters.entities_repo import EntitiesRepository
     from src.adapters.google_calendar import (
         GoogleCalendarClient,
         extract_attendees,
@@ -42,6 +44,7 @@ _calendar_client: GoogleCalendarClient | None = None
 _meetings_repo: MeetingsRepository | None = None
 _user_state_repo: UserStateRepository | None = None
 _scheduler: SchedulerClient | None = None
+_entities_repo: EntitiesRepository | None = None
 
 
 def get_calendar_client() -> GoogleCalendarClient:
@@ -78,6 +81,18 @@ def get_scheduler() -> SchedulerClient:
     if _scheduler is None:
         _scheduler = SchedulerClient()
     return _scheduler
+
+
+def get_entities_repo() -> EntitiesRepository | None:
+    """Get or create the entities repository (Slice 3)."""
+    global _entities_repo
+    entities_table = os.environ.get("ENTITIES_TABLE")
+    aliases_table = os.environ.get("ALIASES_TABLE")
+    if not entities_table or not aliases_table:
+        return None
+    if _entities_repo is None:
+        _entities_repo = EntitiesRepository(entities_table, aliases_table)
+    return _entities_repo
 
 
 @logger.inject_lambda_context
@@ -204,6 +219,32 @@ def sync_calendar_events() -> dict[str, int]:
             status=existing.status if existing else "pending",
             google_etag=event.get("etag"),
         )
+
+        # Slice 3: Auto-create entities for attendees with emails
+        entities_repo = get_entities_repo()
+        if entities_repo:
+            try:
+                attendee_entity_ids = []
+                for attendee in meeting.attendees:
+                    if attendee.email:
+                        entity = entities_repo.get_or_create_by_email(
+                            user_id, attendee.email, attendee.name
+                        )
+                        attendee_entity_ids.append(entity.entity_id)
+                meeting.attendee_entity_ids = attendee_entity_ids
+                logger.info(
+                    "Created/linked entities for attendees",
+                    extra={
+                        "meeting_id": meeting.meeting_id,
+                        "entity_count": len(attendee_entity_ids),
+                    },
+                )
+            except Exception as e:
+                # Non-fatal - continue with meeting sync even if entity creation fails
+                logger.warning(
+                    "Failed to create entities for attendees",
+                    extra={"meeting_id": meeting.meeting_id, "error": str(e)},
+                )
 
         repo.save_meeting(meeting)
         synced += 1
