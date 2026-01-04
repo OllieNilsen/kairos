@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
-from src.adapters.transcripts import TranscriptsRepository
+from src.adapters.transcripts_repo import TranscriptsRepository
 from src.core.models import TranscriptSegment
 
 

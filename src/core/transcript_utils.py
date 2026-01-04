@@ -7,6 +7,7 @@ This module provides utilities for:
 
 from __future__ import annotations
 
+import contextlib
 import re
 from datetime import datetime
 
@@ -54,7 +55,10 @@ def normalize_text(text: str) -> str:
     return text
 
 
-def convert_bland_transcript(turns: list[TranscriptTurn]) -> list[TranscriptSegment]:
+def convert_bland_transcript(
+    turns: list[TranscriptTurn],
+    call_start_time: str | None = None,
+) -> list[TranscriptSegment]:
     """Convert Bland AI transcript turns to our internal TranscriptSegment format.
 
     Bland provides turns with:
@@ -64,13 +68,16 @@ def convert_bland_transcript(turns: list[TranscriptTurn]) -> list[TranscriptSegm
     - created_at: ISO timestamp when segment was spoken
 
     We convert to TranscriptSegment with:
-    - segment_id: "seg_{id}"
+    - segment_id: "seg_{id:04d}" (zero-padded)
     - t0/t1: relative timestamps in seconds from call start
     - speaker: mapped from user field
     - text: unchanged
 
     Args:
         turns: List of TranscriptTurn from Bland webhook
+        call_start_time: Optional ISO timestamp when call started. If provided,
+            timestamps are calculated relative to this. If None and turns have
+            created_at timestamps, uses first turn's timestamp as base.
 
     Returns:
         List of TranscriptSegment with relative timing
@@ -80,35 +87,51 @@ def convert_bland_transcript(turns: list[TranscriptTurn]) -> list[TranscriptSegm
 
     segments: list[TranscriptSegment] = []
 
-    # Parse all timestamps first
-    timestamps: list[datetime] = []
-    for turn in turns:
-        try:
-            # Handle various ISO formats
-            ts = datetime.fromisoformat(turn.created_at.replace("Z", "+00:00"))
-            timestamps.append(ts)
-        except (ValueError, AttributeError):
-            # Fallback: use None, will handle below
-            timestamps.append(None)  # type: ignore[arg-type]
+    # Determine base time for relative timestamp calculation
+    # Only calculate timestamps if call_start_time is explicitly provided
+    base_time: datetime | None = None
 
-    # Calculate base time (first segment starts at 0)
-    base_time = timestamps[0] if timestamps and timestamps[0] else None
+    if call_start_time:
+        with contextlib.suppress(ValueError, AttributeError):
+            base_time = datetime.fromisoformat(call_start_time.replace("Z", "+00:00"))
+
+    # Parse all turn timestamps (only if we have a valid base_time)
+    timestamps: list[datetime | None] = []
+    if base_time:
+        for turn in turns:
+            try:
+                if turn.created_at:
+                    ts = datetime.fromisoformat(turn.created_at.replace("Z", "+00:00"))
+                    timestamps.append(ts)
+                else:
+                    timestamps.append(None)
+            except (ValueError, AttributeError):
+                timestamps.append(None)
+    else:
+        timestamps = [None] * len(turns)
 
     for i, turn in enumerate(turns):
-        # Calculate t0 (relative to first segment)
-        t0 = (timestamps[i] - base_time).total_seconds() if base_time and timestamps[i] else 0.0
+        # Generate zero-padded segment ID
+        segment_id = f"seg_{turn.id:04d}"
 
-        # Calculate t1 (start of next segment, or estimated from text length)
-        if i + 1 < len(turns) and timestamps[i + 1] and base_time:
-            t1 = (timestamps[i + 1] - base_time).total_seconds()
-        else:
-            # Estimate based on average speaking rate (~150 words/min = 2.5 words/sec)
-            word_count = len(turn.text.split())
-            estimated_duration = max(1.0, word_count / 2.5)  # At least 1 second
-            t1 = t0 + estimated_duration
+        # Calculate t0 (relative to base time)
+        t0 = 0.0
+        t1 = 0.0
+
+        if base_time and timestamps[i]:
+            t0 = (timestamps[i] - base_time).total_seconds()
+
+            # Calculate t1: use next segment's start time if available
+            if i + 1 < len(turns) and timestamps[i + 1]:
+                t1 = (timestamps[i + 1] - base_time).total_seconds()
+            else:
+                # Estimate based on word count (~150 words/min = 2.5 words/sec)
+                word_count = len(turn.text.split())
+                estimated_duration = (word_count / 150) * 60  # Convert to seconds
+                t1 = t0 + estimated_duration
 
         segment = TranscriptSegment(
-            segment_id=f"seg_{turn.id}",
+            segment_id=segment_id,
             t0=t0,
             t1=t1,
             speaker=turn.user,

@@ -104,7 +104,7 @@ class TestConvertBlandTranscript:
         assert segments[1].t0 == 15.0
 
     def test_duration_estimation(self) -> None:
-        """Should estimate segment duration based on word count."""
+        """Should use next segment's start time for t1, or estimate for last segment."""
         turns = [
             TranscriptTurn(
                 id=1,
@@ -122,13 +122,13 @@ class TestConvertBlandTranscript:
 
         segments = convert_bland_transcript(turns, call_start_time="2024-01-15T10:00:00Z")
 
-        # Short message should have small duration
-        assert segments[0].t1 > segments[0].t0
-        assert segments[0].t1 - segments[0].t0 < 1.0  # Less than 1 second
+        # First segment's t1 should be next segment's start time (5.0)
+        assert segments[0].t0 == 0.0
+        assert segments[0].t1 == 5.0  # Uses actual next segment timestamp
 
-        # Longer message should have longer duration
-        assert segments[1].t1 > segments[1].t0
-        assert segments[1].t1 - segments[1].t0 > 1.0  # More than 1 second
+        # Last segment's t1 should be estimated from word count
+        assert segments[1].t0 == 5.0
+        assert segments[1].t1 > segments[1].t0  # Estimated duration
 
     def test_without_call_start_time(self) -> None:
         """Should handle missing call_start_time gracefully."""

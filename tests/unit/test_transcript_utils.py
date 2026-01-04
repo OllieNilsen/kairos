@@ -67,7 +67,7 @@ class TestConvertBlandTranscript:
         segments = convert_bland_transcript(turns)
 
         assert len(segments) == 1
-        assert segments[0].segment_id == "seg_1"
+        assert segments[0].segment_id == "seg_0001"
         assert segments[0].text == "Hello, this is a test."
         assert segments[0].speaker == "user"
         assert segments[0].t0 == 0.0
@@ -95,7 +95,7 @@ class TestConvertBlandTranscript:
             ),
         ]
 
-        segments = convert_bland_transcript(turns)
+        segments = convert_bland_transcript(turns, call_start_time="2024-01-15T10:00:00Z")
 
         assert len(segments) == 3
         # First segment starts at 0
@@ -126,7 +126,7 @@ class TestConvertBlandTranscript:
 
         segments = convert_bland_transcript(turns)
 
-        assert segments[0].segment_id == "seg_42"
+        assert segments[0].segment_id == "seg_0042"
 
     def test_maps_speaker_correctly(self) -> None:
         """Should map Bland's 'user' field to speaker."""
@@ -170,7 +170,7 @@ class TestConvertBlandTranscript:
             )
         ]
 
-        segments = convert_bland_transcript(turns)
+        segments = convert_bland_transcript(turns, call_start_time="2024-01-15T10:00:00Z")
 
         # Last segment should have t1 > t0
         assert segments[0].t1 > segments[0].t0
@@ -192,7 +192,7 @@ class TestConvertBlandTranscript:
             ),
         ]
 
-        segments = convert_bland_transcript(turns)
+        segments = convert_bland_transcript(turns, call_start_time="2024-01-15T10:00:00+00:00")
 
         assert len(segments) == 2
         assert segments[1].t0 == 5.0
