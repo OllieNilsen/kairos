@@ -15,12 +15,13 @@ Operating procedure (must follow rule file):
 - Idempotency for all new side effects (transcripts, mentions, edges, entities).
 
 Now do ONLY this (no code yet):
-1) Read PLAN-SLICE3.md and identify which items are already DONE/IN PROGRESS per the plan.
-2) Scan the repo to verify what is actually implemented already (especially models, meeting attendee changes, calendar_webhook changes).
-3) Produce a “Slice 3 Step List”:
+1) Read PLAN.md and familiarise yourself with the architecture and design for SLICE 1 and 2.
+2) Read PLAN-SLICE3.md and identify which items are already DONE/IN PROGRESS per the plan.
+3) Scan the repo to verify what is actually implemented already (especially models, meeting attendee changes, calendar_webhook changes).
+4) Produce a “Slice 3 Step List”:
    - Enumerate the remaining TODO/IN PROGRESS items from PLAN-SLICE3.md in a safe order.
    - For each step, specify: files to touch, tests to add, idempotency implications, and any risk to existing behavior.
-4) Ask me to choose the FIRST single step to implement.
+5) Ask me to choose the FIRST single step to implement.
 
 After I pick the step:
 - Implement ONLY that step with TDD and deterministic unit tests.
