@@ -164,7 +164,8 @@ Rules:
                 system_prompt="You are a strict logic verifier.",
             )
 
-            return response.verdict == "SUPPORTED"
+            is_supported: bool = response.verdict == "SUPPORTED"
+            return is_supported
 
         except Exception as e:
             logger.error(f"Entailment check failed: {e}")

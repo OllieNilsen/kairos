@@ -46,6 +46,9 @@ class MeetingsRepository:
             item["description"] = meeting.description
         if meeting.location:
             item["location"] = meeting.location
+        # Slice 3: Add attendee entity IDs if present
+        if meeting.attendee_entity_ids:
+            item["attendee_entity_ids"] = meeting.attendee_entity_ids
 
         self.table.put_item(Item=item)
 
@@ -134,6 +137,7 @@ class MeetingsRepository:
             start_time=datetime.fromisoformat(item["start_time"]),
             end_time=datetime.fromisoformat(item["end_time"]),
             attendees=item.get("attendees", []),
+            attendee_entity_ids=item.get("attendee_entity_ids", []),  # Slice 3
             status=item.get("status", "pending"),
             google_etag=item.get("google_etag"),
             created_at=datetime.fromisoformat(item["created_at"]),

@@ -8,16 +8,10 @@ import anthropic
 from anthropic.types import TextBlock, ToolUseBlock
 from pydantic import BaseModel
 
-# Support both Lambda and test import paths
-try:
-    from core.interfaces import LLMClient
-except ImportError:
-    from src.core.interfaces import LLMClient
-
 T = TypeVar("T", bound=BaseModel)
 
 
-class AnthropicAdapter(LLMClient):
+class AnthropicAdapter:
     """Anthropic implementation of LLMClient."""
 
     # Use Haiku for speed/cost as per Slice 3 plan

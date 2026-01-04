@@ -167,7 +167,8 @@ class TranscriptsRepository:
             Limit=1,
         )
 
-        return response.get("Count", 0) > 0
+        count: int = response.get("Count", 0)
+        return count > 0
 
     def _item_to_segment(self, item: dict[str, Any]) -> TranscriptSegment:
         """Convert a DynamoDB item to a TranscriptSegment."""
