@@ -390,3 +390,123 @@ class TestMeetingsRepository:
             "Bob Jones",
             "Charlie (External)",
         ]
+
+    def test_save_meeting_with_attendee_entity_ids(
+        self, repo: MeetingsRepository, mock_dynamodb: MagicMock
+    ) -> None:
+        """Should save attendee_entity_ids when present (Slice 3)."""
+        meeting = Meeting(
+            user_id="user-001",
+            meeting_id="meeting-with-entities",
+            title="Meeting with Entities",
+            start_time=datetime(2024, 1, 15, 10, 0, tzinfo=UTC),
+            end_time=datetime(2024, 1, 15, 10, 30, tzinfo=UTC),
+            attendees=[
+                AttendeeInfo(name="Alice Smith", email="alice@example.com"),
+                AttendeeInfo(name="Bob Jones", email="bob@example.com"),
+            ],
+            attendee_entity_ids=["entity-123", "entity-456"],
+            status="pending",
+            created_at=datetime(2024, 1, 14, 12, 0, tzinfo=UTC),
+        )
+
+        repo.save_meeting(meeting)
+
+        item = mock_dynamodb.put_item.call_args[1]["Item"]
+        assert item["attendee_entity_ids"] == ["entity-123", "entity-456"]
+
+    def test_save_meeting_without_attendee_entity_ids(
+        self, repo: MeetingsRepository, mock_dynamodb: MagicMock
+    ) -> None:
+        """Should not include attendee_entity_ids field when empty (Slice 3)."""
+        meeting = Meeting(
+            user_id="user-001",
+            meeting_id="meeting-no-entities",
+            title="Meeting without Entity IDs",
+            start_time=datetime(2024, 1, 15, 10, 0, tzinfo=UTC),
+            end_time=datetime(2024, 1, 15, 10, 30, tzinfo=UTC),
+            attendees=[AttendeeInfo(name="Alice", email="alice@example.com")],
+            attendee_entity_ids=[],  # Empty list
+            status="pending",
+            created_at=datetime(2024, 1, 14, 12, 0, tzinfo=UTC),
+        )
+
+        repo.save_meeting(meeting)
+
+        item = mock_dynamodb.put_item.call_args[1]["Item"]
+        # Empty list should not be saved to reduce storage
+        assert "attendee_entity_ids" not in item
+
+    def test_item_to_meeting_with_attendee_entity_ids(self, repo: MeetingsRepository) -> None:
+        """Should correctly deserialize attendee_entity_ids from DynamoDB (Slice 3)."""
+        item = {
+            "user_id": "user-001",
+            "meeting_id": "meeting-123",
+            "title": "Test Meeting",
+            "start_time": "2024-01-15T10:00:00+00:00",
+            "end_time": "2024-01-15T10:30:00+00:00",
+            "attendees": [
+                {"name": "Alice Smith", "email": "alice@example.com"},
+                {"name": "Bob Jones", "email": "bob@example.com"},
+            ],
+            "attendee_entity_ids": ["entity-alice", "entity-bob"],
+            "status": "pending",
+            "created_at": "2024-01-14T12:00:00+00:00",
+        }
+
+        meeting = repo._item_to_meeting(item)
+
+        assert meeting.attendee_entity_ids == ["entity-alice", "entity-bob"]
+
+    def test_item_to_meeting_without_attendee_entity_ids(self, repo: MeetingsRepository) -> None:
+        """Should default to empty list when attendee_entity_ids not present (Slice 3)."""
+        item = {
+            "user_id": "user-001",
+            "meeting_id": "meeting-123",
+            "title": "Test Meeting",
+            "start_time": "2024-01-15T10:00:00+00:00",
+            "end_time": "2024-01-15T10:30:00+00:00",
+            "attendees": [{"name": "Alice", "email": "alice@example.com"}],
+            "status": "pending",
+            "created_at": "2024-01-14T12:00:00+00:00",
+            # Note: attendee_entity_ids not present (old meeting from before Slice 3)
+        }
+
+        meeting = repo._item_to_meeting(item)
+
+        # Should default to empty list for backward compatibility
+        assert meeting.attendee_entity_ids == []
+
+    def test_round_trip_attendee_entity_ids(
+        self, repo: MeetingsRepository, mock_dynamodb: MagicMock
+    ) -> None:
+        """Should correctly round-trip attendee_entity_ids through save and get (Slice 3)."""
+        original_meeting = Meeting(
+            user_id="user-001",
+            meeting_id="meeting-roundtrip-entities",
+            title="Entity Round Trip Test",
+            start_time=datetime(2024, 1, 15, 10, 0, tzinfo=UTC),
+            end_time=datetime(2024, 1, 15, 10, 30, tzinfo=UTC),
+            attendees=[
+                AttendeeInfo(name="Alice Smith", email="alice@example.com"),
+                AttendeeInfo(name="Bob Jones", email="bob@example.com"),
+            ],
+            attendee_entity_ids=["entity-uuid-1", "entity-uuid-2"],
+            status="pending",
+            created_at=datetime(2024, 1, 14, 12, 0, tzinfo=UTC),
+        )
+
+        # Save the meeting
+        repo.save_meeting(original_meeting)
+
+        # Capture what was saved
+        saved_item = mock_dynamodb.put_item.call_args[1]["Item"]
+        assert saved_item["attendee_entity_ids"] == ["entity-uuid-1", "entity-uuid-2"]
+
+        # Simulate retrieving from DynamoDB
+        mock_dynamodb.get_item.return_value = {"Item": saved_item}
+        retrieved_meeting = repo.get_meeting("user-001", "meeting-roundtrip-entities")
+
+        # Verify entity IDs were preserved
+        assert retrieved_meeting is not None
+        assert retrieved_meeting.attendee_entity_ids == ["entity-uuid-1", "entity-uuid-2"]

@@ -118,12 +118,16 @@ def convert_bland_transcript(
         t0 = 0.0
         t1 = 0.0
 
-        if base_time and timestamps[i]:
-            t0 = (timestamps[i] - base_time).total_seconds()
+        if base_time and timestamps[i] is not None:
+            ts_i = timestamps[i]
+            assert ts_i is not None  # For mypy
+            t0 = (ts_i - base_time).total_seconds()
 
             # Calculate t1: use next segment's start time if available
-            if i + 1 < len(turns) and timestamps[i + 1]:
-                t1 = (timestamps[i + 1] - base_time).total_seconds()
+            if i + 1 < len(turns) and timestamps[i + 1] is not None:
+                ts_next = timestamps[i + 1]
+                assert ts_next is not None  # For mypy
+                t1 = (ts_next - base_time).total_seconds()
             else:
                 # Estimate based on word count (~150 words/min = 2.5 words/sec)
                 word_count = len(turn.text.split())
