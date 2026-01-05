@@ -308,6 +308,95 @@ class Meeting(BaseModel):
         return "\n".join(parts)
 
 
+# === Slice 4: Kairos Calendar Normal Form (KCNF) ===
+
+
+class OrganizerInfo(BaseModel):
+    """Organizer information for a calendar event."""
+
+    name: str | None = None
+    email: str | None = None
+
+
+class ConferenceInfo(BaseModel):
+    """Conference/video call information for a calendar event."""
+
+    join_url: str | None = None
+    conference_id: str | None = None
+    phone: str | None = None
+
+
+class RecurrenceInfo(BaseModel):
+    """Recurrence metadata for recurring calendar events.
+
+    Required for MVP to handle series, instances, and exceptions correctly.
+    """
+
+    provider_series_id: str | None = None  # Series master ID (Google: recurringEventId)
+    provider_instance_id: str | None = None  # Instance ID if this is an occurrence
+    is_recurring_instance: bool = False  # True if this is an instance of a series
+    is_exception: bool = False  # True if modified from series pattern
+    original_start: datetime | None = None  # Original start time for exceptions (before moved)
+    recurrence_rule: str | None = None  # RRULE (for series masters only)
+
+
+class KairosCalendarEvent(BaseModel):
+    """Provider-agnostic calendar event model (KCNF).
+
+    Normalizes Google Calendar and Microsoft Graph events into a single format.
+    All downstream logic (briefings, invite triage, debrief selection) uses KCNF.
+    """
+
+    # === Tenant + provider identity ===
+    user_id: str
+    provider: Literal["google", "microsoft"]
+    provider_calendar_id: str | None = None
+    provider_event_id: str
+    provider_etag: str | None = None  # Google (preserved for reference/debug only)
+    provider_change_key: str | None = None  # Microsoft (preserved for reference/debug only)
+    provider_version: str  # Unified version guard (MUST be set on ingest):
+    # - Google: provider_version = provider_etag
+    # - Microsoft: provider_version = provider_change_key
+    # - Fallback: last_modified_at ISO string (only if provider lacks version token)
+    #
+    # NOTE: provider_etag and provider_change_key are preserved for reference/debug,
+    # but MUST NOT be used directly for concurrency guards or staleness checks.
+    # Always use provider_version.
+
+    # === Core event fields ===
+    title: str | None = None
+    description: str | None = None
+    location: str | None = None
+
+    start: datetime  # MUST be tz-aware for GSI_DAY computation
+    end: datetime  # MUST be tz-aware
+    is_all_day: bool = False
+    status: str | None = None  # confirmed/cancelled/tentative
+
+    # === People ===
+    organizer: OrganizerInfo | None = None
+    attendees: list[AttendeeInfo] = Field(default_factory=list)
+
+    # === Conferencing ===
+    conference: ConferenceInfo | None = None
+
+    # === Recurrence (required for MVP) ===
+    recurrence: RecurrenceInfo | None = None
+
+    # === Kairos metadata ===
+    is_debrief_event: bool = False  # True if this is a Kairos-created debrief event
+    kairos_tags: dict[str, Any] = Field(default_factory=dict)  # Normalized provider extensions
+
+    # === Sync/audit ===
+    ingested_at: datetime
+    last_modified_at: datetime | None = None  # Provider last modified timestamp (for reference)
+
+    # === DynamoDB-specific fields (not part of logical model) ===
+    item_type: Literal["event", "redirect"] = "event"  # For tombstone redirects
+    redirect_to_sk: str | None = None  # Target SK if item_type="redirect"
+    ttl: int | None = None  # Unix timestamp for DynamoDB TTL (180 days from end)
+
+
 # === Slice 3: Knowledge Graph Models ===
 
 

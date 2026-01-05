@@ -228,6 +228,54 @@ class KairosStack(Stack):
             time_to_live_attribute="ttl",
         )
 
+        # ========================================
+        # SLICE 4: KCNF Calendar Events
+        # ========================================
+
+        # === DynamoDB Table for KCNF Calendar Events (Slice 4A) ===
+        calendar_events_table = dynamodb.Table(
+            self,
+            "CalendarEventsTable",
+            table_name="kairos-calendar-events",
+            partition_key=dynamodb.Attribute(
+                name="pk", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="sk", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,  # For dev - change for prod
+            time_to_live_attribute="ttl",
+        )
+
+        # GSI_DAY: Query all events for user on a specific day in their local timezone
+        # GSI1PK = USER#<user_id>#DAY#YYYY-MM-DD
+        # GSI1SK = <start_iso>#<provider>#<provider_event_id>
+        calendar_events_table.add_global_secondary_index(
+            index_name="GSI_DAY",
+            partition_key=dynamodb.Attribute(
+                name="gsi1pk", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="gsi1sk", type=dynamodb.AttributeType.STRING
+            ),
+            projection_type=dynamodb.ProjectionType.ALL,
+        )
+
+        # GSI_PROVIDER_ID: Lookup by provider event ID without knowing start time
+        # GSI2PK = USER#<user_id>
+        # GSI2SK = PROVIDER#<provider>#EVENT#<provider_event_id>
+        calendar_events_table.add_global_secondary_index(
+            index_name="GSI_PROVIDER_ID",
+            partition_key=dynamodb.Attribute(
+                name="gsi2pk", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="gsi2sk", type=dynamodb.AttributeType.STRING
+            ),
+            projection_type=dynamodb.ProjectionType.ALL,
+        )
+
         # === DynamoDB Table for Transcripts (Slice 3) ===
         transcripts_table = dynamodb.Table(
             self,
@@ -377,12 +425,17 @@ class KairosStack(Stack):
                 "MEETINGS_TABLE_NAME": meetings_table.table_name,
                 "USER_ID": "default",  # MVP: single user
                 "POWERTOOLS_SERVICE_NAME": "kairos-calendar-webhook",
+                # Slice 4A: KCNF shadow-write (disabled by default)
+                "KCNF_ENABLED": "false",
+                "CALENDAR_EVENTS_TABLE": calendar_events_table.table_name,
+                "USER_TIMEZONE": "UTC",  # MVP: single user, default UTC
             },
             **common_lambda_props,
         )
 
         # Grant DynamoDB access
         meetings_table.grant_read_write_data(calendar_webhook_fn)
+        calendar_events_table.grant_read_write_data(calendar_webhook_fn)  # Slice 4A
 
         # Grant SSM read access for Google OAuth credentials
         calendar_webhook_fn.add_to_role_policy(

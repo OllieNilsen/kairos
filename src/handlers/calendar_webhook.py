@@ -12,6 +12,8 @@ from aws_lambda_powertools import Logger
 
 # Support both Lambda (adapters...) and test (src.adapters...) import paths
 try:
+    from adapters.calendar_events_repo import CalendarEventsRepository
+    from adapters.calendar_normalizer import normalize_google_event
     from adapters.entities_repo import EntitiesRepository
     from adapters.google_calendar import (
         GoogleCalendarClient,
@@ -23,6 +25,8 @@ try:
     from adapters.user_state import UserStateRepository
     from core.models import Meeting
 except ImportError:
+    from src.adapters.calendar_events_repo import CalendarEventsRepository
+    from src.adapters.calendar_normalizer import normalize_google_event
     from src.adapters.entities_repo import EntitiesRepository
     from src.adapters.google_calendar import (
         GoogleCalendarClient,
@@ -42,6 +46,7 @@ logger = Logger(service="kairos-calendar-webhook")
 # Lazy initialization
 _calendar_client: GoogleCalendarClient | None = None
 _meetings_repo: MeetingsRepository | None = None
+_calendar_events_repo: CalendarEventsRepository | None = None
 _user_state_repo: UserStateRepository | None = None
 _scheduler: SchedulerClient | None = None
 _entities_repo: EntitiesRepository | None = None
@@ -62,6 +67,17 @@ def get_meetings_repo() -> MeetingsRepository:
         table_name = os.environ["MEETINGS_TABLE_NAME"]
         _meetings_repo = MeetingsRepository(table_name)
     return _meetings_repo
+
+
+def get_calendar_events_repo() -> CalendarEventsRepository | None:
+    """Get or create the calendar events repository (KCNF - Slice 4)."""
+    global _calendar_events_repo
+    table_name = os.environ.get("CALENDAR_EVENTS_TABLE")
+    if not table_name:
+        return None
+    if _calendar_events_repo is None:
+        _calendar_events_repo = CalendarEventsRepository(table_name)
+    return _calendar_events_repo
 
 
 def get_user_state_repo() -> UserStateRepository | None:
@@ -248,6 +264,32 @@ def sync_calendar_events() -> dict[str, int]:
 
         repo.save_meeting(meeting)
         synced += 1
+
+        # Slice 4A: Shadow-write to KCNF table (if enabled)
+        kcnf_enabled = os.getenv("KCNF_ENABLED", "false").lower() == "true"
+        if kcnf_enabled:
+            calendar_events_repo = get_calendar_events_repo()
+            if calendar_events_repo:
+                try:
+                    # Normalize Google event to KCNF
+                    user_timezone = os.getenv("USER_TIMEZONE", "UTC")
+                    kcnf_event = normalize_google_event(
+                        event, user_id=user_id, ingested_at=datetime.now(UTC)
+                    )
+
+                    # Save to KCNF table
+                    calendar_events_repo.save_event(kcnf_event, user_timezone=user_timezone)
+
+                    logger.debug(
+                        "KCNF shadow-write successful",
+                        extra={"event_id": event["id"]},
+                    )
+                except Exception as e:
+                    # Non-fatal - graceful degradation (log but continue)
+                    logger.warning(
+                        "KCNF shadow-write failed",
+                        extra={"event_id": event["id"], "error": str(e)},
+                    )
 
     logger.info(
         "Calendar sync complete",
