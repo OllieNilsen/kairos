@@ -397,6 +397,63 @@ class KairosCalendarEvent(BaseModel):
     ttl: int | None = None  # Unix timestamp for DynamoDB TTL (180 days from end)
 
 
+# === Multi-user Primitives (Slice 4B) ===
+
+
+class User(BaseModel):
+    """User profile for multi-tenant system (Slice 4B).
+
+    Stored in kairos-users table with:
+    - Profile item: PK=USER#<user_id>, SK=PROFILE
+    - Phone routing: PK=PHONE#<e164>, SK=ROUTE (for O(1) SMS routing)
+    - Email routing: PK=EMAIL#<email>, SK=ROUTE (for admin ops)
+    """
+
+    user_id: str
+    primary_email: str
+    phone_number_e164: str  # E.164 format (e.g., +442012341234)
+    timezone: str = "UTC"  # IANA timezone
+    preferred_prompt_time: str = "17:30"  # HH:MM format
+    status: Literal["active", "paused", "stopped"] = "active"
+    default_calendar_provider: Literal["google", "microsoft"] | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CalendarSyncState(BaseModel):
+    """Calendar sync state for webhook subscriptions (Slice 4B).
+
+    Stored in kairos-calendar-sync-state table with:
+    - Sync item: PK=USER#<user_id>#PROVIDER#<provider>, SK=SYNC
+    - Google channel routing: PK=GOOGLE#CHANNEL#<channel_id>, SK=ROUTE
+    - Microsoft sub routing: PK=MS#SUB#<subscription_id>, SK=ROUTE
+    """
+
+    user_id: str
+    provider: Literal["google", "microsoft"]
+    provider_calendar_id: str  # "primary" for Google, mailbox ID for Microsoft
+
+    # Webhook subscription
+    subscription_id: str | None = None  # Graph subscription ID or Google channel ID
+    subscription_expiry: datetime | None = None
+    last_sync_at: datetime | None = None
+
+    # Delta sync tokens
+    delta_link: str | None = None  # Microsoft Graph delta link
+    sync_token: str | None = None  # Google sync token
+
+    # Security tokens (for webhook verification)
+    channel_token: str | None = None  # Google only: random secret for X-Goog-Channel-Token
+    client_state: str | None = None  # Microsoft only: UUID for clientState verification
+    previous_client_state: str | None = None  # Microsoft only: for rotation overlap window
+    previous_client_state_expires: datetime | None = None  # Microsoft only: overlap window end
+
+    # Error tracking
+    error_state: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
 # === Slice 3: Knowledge Graph Models ===
 
 
