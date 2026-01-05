@@ -276,6 +276,36 @@ class KairosStack(Stack):
             projection_type=dynamodb.ProjectionType.ALL,
         )
 
+        # === DynamoDB Table for Users (Slice 4B - Multi-user primitives) ===
+        users_table = dynamodb.Table(
+            self,
+            "UsersTable",
+            table_name="kairos-users",
+            partition_key=dynamodb.Attribute(
+                name="pk", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="sk", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,  # For dev - change for prod
+        )
+
+        # === DynamoDB Table for Calendar Sync State (Slice 4B - Webhook routing) ===
+        calendar_sync_state_table = dynamodb.Table(
+            self,
+            "CalendarSyncStateTable",
+            table_name="kairos-calendar-sync-state",
+            partition_key=dynamodb.Attribute(
+                name="pk", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="sk", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,  # For dev - change for prod
+        )
+
         # === DynamoDB Table for Transcripts (Slice 3) ===
         transcripts_table = dynamodb.Table(
             self,
