@@ -515,3 +515,206 @@ class TestEntityAutoCreation:
         # attendee_entity_ids should be empty (default)
         assert saved_meeting.attendee_entity_ids == []
         assert result["synced"] == 1
+
+
+class TestKCNFShadowWrite:
+    """Tests for KCNF shadow-write functionality (Slice 4A)."""
+
+    @pytest.fixture
+    def sample_google_event(self) -> dict:
+        """Create a sample Google Calendar event."""
+        return {
+            "id": "event123",
+            "summary": "Team Meeting",
+            "description": "Weekly sync",
+            "location": "Conference Room A",
+            "status": "confirmed",
+            "start": {"dateTime": "2025-01-05T10:00:00-05:00", "timeZone": "America/New_York"},
+            "end": {"dateTime": "2025-01-05T11:00:00-05:00", "timeZone": "America/New_York"},
+            "etag": "etag123",
+            "updated": "2025-01-05T09:00:00Z",
+            "attendees": [
+                {"email": "alice@example.com", "displayName": "Alice Smith"},
+                {"email": "bob@example.com", "displayName": "Bob Jones"},
+            ],
+            "organizer": {"email": "organizer@example.com", "displayName": "Event Organizer"},
+        }
+
+    def test_shadow_write_disabled_by_default(self, sample_google_event: dict) -> None:
+        """Should only write to legacy table when KCNF feature flag is disabled."""
+        from src.handlers.calendar_webhook import sync_calendar_events
+
+        mock_calendar = MagicMock()
+        mock_calendar.list_events.return_value = [sample_google_event]
+
+        mock_meetings_repo = MagicMock()
+        mock_meetings_repo.get_meeting.return_value = None  # New event
+        mock_calendar_events_repo = MagicMock()
+
+        with (
+            patch("src.handlers.calendar_webhook.get_calendar_client", return_value=mock_calendar),
+            patch(
+                "src.handlers.calendar_webhook.get_meetings_repo", return_value=mock_meetings_repo
+            ),
+            patch(
+                "src.handlers.calendar_webhook.get_calendar_events_repo",
+                return_value=mock_calendar_events_repo,
+            ),
+            patch("src.handlers.calendar_webhook.os.getenv") as mock_getenv,
+            patch("src.handlers.calendar_webhook.get_user_state_repo", return_value=None),
+            patch("src.handlers.calendar_webhook.get_entities_repo", return_value=None),
+            patch("src.handlers.calendar_webhook.check_debrief_event_changes", return_value={}),
+        ):
+            mock_getenv.side_effect = lambda key, default=None: {
+                "USER_ID": "user123",
+                "KCNF_ENABLED": "false",  # Feature flag disabled
+            }.get(key, default)
+
+            result = sync_calendar_events()
+
+        # Legacy table should be written
+        mock_meetings_repo.save_meeting.assert_called_once()
+
+        # KCNF table should NOT be written
+        mock_calendar_events_repo.save_event.assert_not_called()
+
+        assert result["synced"] == 1
+
+    def test_shadow_write_enabled_writes_both_tables(self, sample_google_event: dict) -> None:
+        """Should write to both legacy and KCNF tables when feature flag enabled."""
+        from src.handlers.calendar_webhook import sync_calendar_events
+
+        mock_calendar = MagicMock()
+        mock_calendar.list_events.return_value = [sample_google_event]
+
+        mock_meetings_repo = MagicMock()
+        mock_meetings_repo.get_meeting.return_value = None  # New event
+        mock_calendar_events_repo = MagicMock()
+
+        with (
+            patch("src.handlers.calendar_webhook.get_calendar_client", return_value=mock_calendar),
+            patch(
+                "src.handlers.calendar_webhook.get_meetings_repo", return_value=mock_meetings_repo
+            ),
+            patch(
+                "src.handlers.calendar_webhook.get_calendar_events_repo",
+                return_value=mock_calendar_events_repo,
+            ),
+            patch("src.handlers.calendar_webhook.os.getenv") as mock_getenv,
+            patch("src.handlers.calendar_webhook.get_user_state_repo", return_value=None),
+            patch("src.handlers.calendar_webhook.get_entities_repo", return_value=None),
+            patch("src.handlers.calendar_webhook.check_debrief_event_changes", return_value={}),
+        ):
+            mock_getenv.side_effect = lambda key, default=None: {
+                "USER_ID": "user123",
+                "KCNF_ENABLED": "true",  # Feature flag enabled
+                "USER_TIMEZONE": "America/New_York",
+            }.get(key, default)
+
+            result = sync_calendar_events()
+
+        # Both tables should be written
+        mock_meetings_repo.save_meeting.assert_called_once()
+        mock_calendar_events_repo.save_event.assert_called_once()
+
+        # Verify KCNF event was normalized correctly
+        kcnf_event = mock_calendar_events_repo.save_event.call_args[0][0]
+        # Note: user_id comes from os.environ.get("USER_ID", "default"), not os.getenv
+        assert kcnf_event.user_id == "default"
+        assert kcnf_event.provider == "google"
+        assert kcnf_event.provider_event_id == "event123"
+        assert kcnf_event.title == "Team Meeting"
+
+        assert result["synced"] == 1
+
+    def test_shadow_write_failure_does_not_break_webhook(self, sample_google_event: dict) -> None:
+        """Should continue and write legacy table even if KCNF write fails (graceful degradation)."""
+        from src.handlers.calendar_webhook import sync_calendar_events
+
+        mock_calendar = MagicMock()
+        mock_calendar.list_events.return_value = [sample_google_event]
+
+        mock_meetings_repo = MagicMock()
+        mock_meetings_repo.get_meeting.return_value = None  # New event
+        mock_calendar_events_repo = MagicMock()
+        mock_calendar_events_repo.save_event.side_effect = Exception("DynamoDB error")
+
+        with (
+            patch("src.handlers.calendar_webhook.get_calendar_client", return_value=mock_calendar),
+            patch(
+                "src.handlers.calendar_webhook.get_meetings_repo", return_value=mock_meetings_repo
+            ),
+            patch(
+                "src.handlers.calendar_webhook.get_calendar_events_repo",
+                return_value=mock_calendar_events_repo,
+            ),
+            patch("src.handlers.calendar_webhook.os.getenv") as mock_getenv,
+            patch("src.handlers.calendar_webhook.get_user_state_repo", return_value=None),
+            patch("src.handlers.calendar_webhook.get_entities_repo", return_value=None),
+            patch("src.handlers.calendar_webhook.check_debrief_event_changes", return_value={}),
+        ):
+            mock_getenv.side_effect = lambda key, default=None: {
+                "USER_ID": "user123",
+                "KCNF_ENABLED": "true",
+                "USER_TIMEZONE": "America/New_York",
+            }.get(key, default)
+
+            result = sync_calendar_events()
+
+        # Legacy table should still be written (graceful degradation)
+        mock_meetings_repo.save_meeting.assert_called_once()
+
+        # KCNF write was attempted
+        mock_calendar_events_repo.save_event.assert_called_once()
+
+        # Webhook should still succeed
+        assert result["synced"] == 1
+
+    def test_shadow_write_normalizer_error_does_not_break_webhook(
+        self, sample_google_event: dict
+    ) -> None:
+        """Should continue with legacy path if normalizer fails."""
+        from src.handlers.calendar_webhook import sync_calendar_events
+
+        mock_calendar = MagicMock()
+        mock_calendar.list_events.return_value = [sample_google_event]
+
+        mock_meetings_repo = MagicMock()
+        mock_meetings_repo.get_meeting.return_value = None  # New event
+        mock_calendar_events_repo = MagicMock()
+
+        with (
+            patch("src.handlers.calendar_webhook.get_calendar_client", return_value=mock_calendar),
+            patch(
+                "src.handlers.calendar_webhook.get_meetings_repo", return_value=mock_meetings_repo
+            ),
+            patch(
+                "src.handlers.calendar_webhook.get_calendar_events_repo",
+                return_value=mock_calendar_events_repo,
+            ),
+            patch("src.handlers.calendar_webhook.os.getenv") as mock_getenv,
+            patch("src.handlers.calendar_webhook.get_user_state_repo", return_value=None),
+            patch("src.handlers.calendar_webhook.get_entities_repo", return_value=None),
+            patch("src.handlers.calendar_webhook.check_debrief_event_changes", return_value={}),
+            patch("src.handlers.calendar_webhook.normalize_google_event") as mock_normalize,
+        ):
+            mock_getenv.side_effect = lambda key, default=None: {
+                "USER_ID": "user123",
+                "KCNF_ENABLED": "true",
+                "USER_TIMEZONE": "America/New_York",
+            }.get(key, default)
+
+            # Make normalizer raise an exception
+            mock_normalize.side_effect = Exception("Normalization failed")
+
+            # Should not raise exception
+            result = sync_calendar_events()
+
+        # Legacy table should still be written
+        mock_meetings_repo.save_meeting.assert_called_once()
+
+        # KCNF write should not have been attempted (normalizer failed first)
+        mock_calendar_events_repo.save_event.assert_not_called()
+
+        # Webhook should still succeed
+        assert result["synced"] == 1

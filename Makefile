@@ -27,14 +27,13 @@ test:
 layer:
 	rm -rf layer
 	mkdir -p layer/python
-	pip install \
-		--platform manylinux2014_aarch64 \
+	uv pip install \
+		--python-platform linux \
 		--target layer/python \
 		--only-binary=:all: \
-		--implementation cp \
 		--python-version 3.12 \
 		pydantic httpx anthropic aws-lambda-powertools
-	@echo "Layer built at ./layer (manylinux2014_aarch64)"
+	@echo "Layer built at ./layer (linux)"
 
 # Deploy to AWS
 deploy: layer
