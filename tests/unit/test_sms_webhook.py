@@ -228,6 +228,7 @@ class TestHandler:
 
     @patch("src.handlers.sms_webhook.parse_sms_intent")
     @patch("src.handlers.sms_webhook.get_llm_client")
+    @patch("src.handlers.sms_webhook.get_users_repo")
     @patch("src.handlers.sms_webhook.get_user_repo")
     @patch("src.handlers.sms_webhook.get_inbound_dedup")
     @patch("src.handlers.sms_webhook.verify_twilio_signature")
@@ -238,6 +239,7 @@ class TestHandler:
         mock_verify: MagicMock,
         mock_dedup: MagicMock,
         mock_user_repo: MagicMock,
+        mock_users_repo: MagicMock,
         mock_llm: MagicMock,
         mock_parse: MagicMock,
     ) -> None:
@@ -245,6 +247,7 @@ class TestHandler:
         mock_param.return_value = "auth-token"
         mock_verify.return_value = True
         mock_dedup.return_value.try_process_message.return_value = True
+        mock_users_repo.return_value.get_user_by_phone.return_value = "user-001"
         mock_user_repo.return_value.get_user_state.return_value = UserState(
             user_id="user-001", phone_number="+15551234567"
         )
@@ -285,6 +288,7 @@ class TestHandler:
     @patch("src.handlers.sms_webhook._handle_no")
     @patch("src.handlers.sms_webhook.parse_sms_intent")
     @patch("src.handlers.sms_webhook.get_llm_client")
+    @patch("src.handlers.sms_webhook.get_users_repo")
     @patch("src.handlers.sms_webhook.get_user_repo")
     @patch("src.handlers.sms_webhook.get_inbound_dedup")
     @patch("src.handlers.sms_webhook.verify_twilio_signature")
@@ -295,6 +299,7 @@ class TestHandler:
         mock_verify: MagicMock,
         mock_dedup: MagicMock,
         mock_user_repo: MagicMock,
+        mock_users_repo: MagicMock,
         mock_llm: MagicMock,
         mock_parse: MagicMock,
         mock_handle_no: MagicMock,
@@ -303,6 +308,7 @@ class TestHandler:
         mock_param.return_value = "auth-token"
         mock_verify.return_value = True
         mock_dedup.return_value.try_process_message.return_value = True
+        mock_users_repo.return_value.get_user_by_phone.return_value = "user-001"
         mock_user_repo.return_value.get_user_state.return_value = UserState(
             user_id="user-001", phone_number="+15551234567"
         )
@@ -319,6 +325,7 @@ class TestHandler:
     @patch("src.handlers.sms_webhook._handle_stop")
     @patch("src.handlers.sms_webhook.parse_sms_intent")
     @patch("src.handlers.sms_webhook.get_llm_client")
+    @patch("src.handlers.sms_webhook.get_users_repo")
     @patch("src.handlers.sms_webhook.get_user_repo")
     @patch("src.handlers.sms_webhook.get_inbound_dedup")
     @patch("src.handlers.sms_webhook.verify_twilio_signature")
@@ -329,6 +336,7 @@ class TestHandler:
         mock_verify: MagicMock,
         mock_dedup: MagicMock,
         mock_user_repo: MagicMock,
+        mock_users_repo: MagicMock,
         mock_llm: MagicMock,
         mock_parse: MagicMock,
         mock_handle_stop: MagicMock,
@@ -337,6 +345,7 @@ class TestHandler:
         mock_param.return_value = "auth-token"
         mock_verify.return_value = True
         mock_dedup.return_value.try_process_message.return_value = True
+        mock_users_repo.return_value.get_user_by_phone.return_value = "user-001"
         mock_user_repo.return_value.get_user_state.return_value = UserState(
             user_id="user-001", phone_number="+15551234567"
         )
@@ -372,3 +381,183 @@ class TestReplyMessages:
         """Unknown message should guide user on what to reply."""
         assert "YES" in REPLY_UNKNOWN or "yes" in REPLY_UNKNOWN.lower()
         assert "NO" in REPLY_UNKNOWN or "no" in REPLY_UNKNOWN.lower()
+
+
+class TestMultiUserPhoneRouting:
+    """Tests for multi-user phone routing (Slice 4B)."""
+
+    @staticmethod
+    def _build_sms_event(phone_number: str = "+442012341234") -> dict[str, Any]:
+        """Build a test SMS webhook event."""
+        import urllib.parse
+
+        # URL-encode the phone numbers (+ becomes %2B)
+        from_encoded = urllib.parse.quote(phone_number, safe="")
+        to_encoded = urllib.parse.quote("+441234567890", safe="")
+
+        return {
+            "body": (
+                f"Body=YES&From={from_encoded}&To={to_encoded}&"
+                "MessageSid=SM123abc&AccountSid=ACabc123"
+            ),
+            "headers": {"x-twilio-signature": "fake_signature"},
+            "requestContext": {
+                "http": {"path": "/sms-webhook"},
+                "domainName": "test.lambda-url.eu-west-1.on.aws",
+            },
+        }
+
+    def test_phone_routing_lookup_success(self) -> None:
+        """Should lookup user_id by phone number using UsersRepository."""
+        from src.handlers.sms_webhook import handler
+
+        mock_users_repo = MagicMock()
+        mock_users_repo.get_user_by_phone.return_value = "user-123"
+
+        mock_user_state_repo = MagicMock()
+        mock_user_state = UserState(
+            user_id="user-123",
+            phone_number="+442012341234",
+            awaiting_reply=True,
+        )
+        mock_user_state_repo.get_user_state.return_value = mock_user_state
+
+        with (
+            patch("src.handlers.sms_webhook.get_users_repo", return_value=mock_users_repo),
+            patch("src.handlers.sms_webhook.get_user_repo", return_value=mock_user_state_repo),
+            patch("src.handlers.sms_webhook.get_inbound_dedup") as mock_dedup,
+            patch("src.handlers.sms_webhook.get_parameter", return_value="fake_token"),
+            patch("src.handlers.sms_webhook.verify_twilio_signature", return_value=True),
+            patch("src.handlers.sms_webhook._handle_ready") as mock_handle_ready,
+        ):
+            mock_dedup_instance = MagicMock()
+            mock_dedup_instance.is_duplicate.return_value = False
+            mock_dedup.return_value = mock_dedup_instance
+            mock_handle_ready.return_value = {"statusCode": 200, "body": "OK"}
+
+            event = self._build_sms_event("+442012341234")
+            result = handler(event, MagicMock())
+
+            # Verify phone lookup was called
+            mock_users_repo.get_user_by_phone.assert_called_once_with(
+                "+442012341234", enforce_rate_limit=True
+            )
+
+            # Verify user state lookup used the routed user_id
+            mock_user_state_repo.get_user_state.assert_called_once_with("user-123")
+
+            assert result["statusCode"] == 200
+
+    def test_phone_not_registered_returns_error(self) -> None:
+        """Should return error message if phone number is not registered."""
+        from src.handlers.sms_webhook import handler
+
+        mock_users_repo = MagicMock()
+        mock_users_repo.get_user_by_phone.return_value = None  # Not registered
+
+        with (
+            patch("src.handlers.sms_webhook.get_users_repo", return_value=mock_users_repo),
+            patch("src.handlers.sms_webhook.get_inbound_dedup") as mock_dedup,
+            patch("src.handlers.sms_webhook.get_parameter", return_value="fake_token"),
+            patch("src.handlers.sms_webhook.verify_twilio_signature", return_value=True),
+        ):
+            mock_dedup_instance = MagicMock()
+            mock_dedup_instance.is_duplicate.return_value = False
+            mock_dedup.return_value = mock_dedup_instance
+
+            event = self._build_sms_event("+449999999999")
+            result = handler(event, MagicMock())
+
+            # Should return error
+            assert result["statusCode"] == 200  # TwiML always 200
+            assert "not registered" in result["body"].lower()
+
+    def test_phone_enumeration_rate_limit_enforced(self) -> None:
+        """Should enforce rate limit on phone lookups (security - P0)."""
+        from src.adapters.users_repo import PhoneEnumerationRateLimitError
+        from src.handlers.sms_webhook import handler
+
+        mock_users_repo = MagicMock()
+        mock_users_repo.get_user_by_phone.side_effect = PhoneEnumerationRateLimitError(
+            "Rate limit exceeded"
+        )
+
+        with (
+            patch("src.handlers.sms_webhook.get_users_repo", return_value=mock_users_repo),
+            patch("src.handlers.sms_webhook.get_inbound_dedup") as mock_dedup,
+            patch("src.handlers.sms_webhook.get_parameter", return_value="fake_token"),
+            patch("src.handlers.sms_webhook.verify_twilio_signature", return_value=True),
+        ):
+            mock_dedup_instance = MagicMock()
+            mock_dedup_instance.is_duplicate.return_value = False
+            mock_dedup.return_value = mock_dedup_instance
+
+            event = self._build_sms_event("+449999999999")
+            result = handler(event, MagicMock())
+
+            # Should reject with rate limit error
+            assert result["statusCode"] == 429
+
+    def test_multi_user_isolation(self) -> None:
+        """Should route different phone numbers to different users (isolation - P0)."""
+        from src.handlers.sms_webhook import handler
+
+        # User 1
+        mock_users_repo_1 = MagicMock()
+        mock_users_repo_1.get_user_by_phone.return_value = "user-001"
+
+        mock_user_state_repo_1 = MagicMock()
+        mock_user_state_1 = UserState(
+            user_id="user-001",
+            phone_number="+441234567890",
+            awaiting_reply=True,
+        )
+        mock_user_state_repo_1.get_user_state.return_value = mock_user_state_1
+
+        with (
+            patch("src.handlers.sms_webhook.get_users_repo", return_value=mock_users_repo_1),
+            patch("src.handlers.sms_webhook.get_user_repo", return_value=mock_user_state_repo_1),
+            patch("src.handlers.sms_webhook.get_inbound_dedup") as mock_dedup,
+            patch("src.handlers.sms_webhook.get_parameter", return_value="fake_token"),
+            patch("src.handlers.sms_webhook.verify_twilio_signature", return_value=True),
+            patch("src.handlers.sms_webhook._handle_ready", return_value={"statusCode": 200}),
+        ):
+            mock_dedup_instance = MagicMock()
+            mock_dedup_instance.is_duplicate.return_value = False
+            mock_dedup.return_value = mock_dedup_instance
+
+            event_1 = self._build_sms_event("+441234567890")
+            handler(event_1, MagicMock())
+
+            # Verify user-001 state was accessed
+            mock_user_state_repo_1.get_user_state.assert_called_with("user-001")
+
+        # User 2 (different phone)
+        mock_users_repo_2 = MagicMock()
+        mock_users_repo_2.get_user_by_phone.return_value = "user-002"
+
+        mock_user_state_repo_2 = MagicMock()
+        mock_user_state_2 = UserState(
+            user_id="user-002",
+            phone_number="+449876543210",
+            awaiting_reply=True,
+        )
+        mock_user_state_repo_2.get_user_state.return_value = mock_user_state_2
+
+        with (
+            patch("src.handlers.sms_webhook.get_users_repo", return_value=mock_users_repo_2),
+            patch("src.handlers.sms_webhook.get_user_repo", return_value=mock_user_state_repo_2),
+            patch("src.handlers.sms_webhook.get_inbound_dedup") as mock_dedup,
+            patch("src.handlers.sms_webhook.get_parameter", return_value="fake_token"),
+            patch("src.handlers.sms_webhook.verify_twilio_signature", return_value=True),
+            patch("src.handlers.sms_webhook._handle_ready", return_value={"statusCode": 200}),
+        ):
+            mock_dedup_instance = MagicMock()
+            mock_dedup_instance.is_duplicate.return_value = False
+            mock_dedup.return_value = mock_dedup_instance
+
+            event_2 = self._build_sms_event("+449876543210")
+            handler(event_2, MagicMock())
+
+            # Verify user-002 state was accessed (not user-001)
+            mock_user_state_repo_2.get_user_state.assert_called_with("user-002")

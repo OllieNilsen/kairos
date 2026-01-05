@@ -28,6 +28,7 @@ try:
         verify_twilio_signature,
     )
     from adapters.user_state import UserStateRepository
+    from adapters.users_repo import PhoneEnumerationRateLimitError, UsersRepository
     from core.models import SMSIntent, TwilioInboundSMS
     from core.sms_intent import parse_sms_intent
     from handlers.prompt_sender import build_multi_meeting_prompt
@@ -43,6 +44,7 @@ except ImportError:
         verify_twilio_signature,
     )
     from src.adapters.user_state import UserStateRepository
+    from src.adapters.users_repo import PhoneEnumerationRateLimitError, UsersRepository
     from src.core.models import SMSIntent, TwilioInboundSMS
     from src.core.sms_intent import parse_sms_intent
     from src.handlers.prompt_sender import build_multi_meeting_prompt
@@ -53,6 +55,7 @@ if TYPE_CHECKING:
 logger = Logger(service="kairos-sms-webhook")
 
 # Configuration from environment
+USERS_TABLE = os.environ.get("USERS_TABLE", "kairos-users")  # Slice 4B: Multi-user routing
 USER_STATE_TABLE = os.environ.get("USER_STATE_TABLE", "kairos-user-state")
 IDEMPOTENCY_TABLE = os.environ.get("IDEMPOTENCY_TABLE", "kairos-idempotency")
 MEETINGS_TABLE = os.environ.get("MEETINGS_TABLE", "kairos-meetings")
@@ -69,13 +72,23 @@ REPLY_STOPPED = "You've been unsubscribed from Kairos. Reply START to re-enable.
 REPLY_UNKNOWN = "I didn't understand that. Reply YES to start your debrief, or NO to skip today."
 REPLY_NO_MEETINGS = "No meetings to debrief today. I'll check in after your next meeting day."
 REPLY_ALREADY_CALLED = "Your debrief call is already in progress or completed for today."
+REPLY_NOT_REGISTERED = "This phone number is not registered with Kairos. Please contact support."
 
 # Lazy-initialized clients
+_users_repo: UsersRepository | None = None  # Slice 4B: Multi-user routing
 _user_repo: UserStateRepository | None = None
 _inbound_dedup: InboundSMSDedup | None = None
 _call_dedup: CallBatchDedup | None = None
 _meetings_repo: MeetingsRepository | None = None
 _llm_client: AnthropicAdapter | None = None
+
+
+def get_users_repo() -> UsersRepository:
+    """Get or create users repository (Slice 4B: Multi-user routing)."""
+    global _users_repo
+    if _users_repo is None:
+        _users_repo = UsersRepository(USERS_TABLE)
+    return _users_repo
 
 
 def get_user_repo() -> UserStateRepository:
@@ -193,9 +206,26 @@ def handler(event: dict[str, Any], context: LambdaContext) -> dict[str, Any]:
         logger.info("Duplicate message - already processed", extra={"message_sid": sms.MessageSid})
         return _twiml_response()
 
-    # 6. Look up user by phone number
-    # For MVP, we use a single user. In production, query by phone number.
-    user_id = os.environ.get("DEFAULT_USER_ID", "user-001")
+    # 6. Look up user by phone number (Slice 4B: Multi-user routing)
+    users_repo = get_users_repo()
+    try:
+        user_id = users_repo.get_user_by_phone(sms.From, enforce_rate_limit=True)
+    except PhoneEnumerationRateLimitError:
+        logger.warning(
+            "Phone enumeration rate limit exceeded",
+            extra={"phone_hint": sms.From[-4:]},  # Log only last 4 digits
+        )
+        return _twiml_response(status=429)
+
+    if not user_id:
+        logger.warning(
+            "Phone number not registered",
+            extra={"phone_hint": sms.From[-4:]},  # Log only last 4 digits
+        )
+        return _twiml_response(REPLY_NOT_REGISTERED)
+
+    logger.info("Routed SMS to user", extra={"user_id": user_id})
+
     user_repo = get_user_repo()
     user_state = user_repo.get_user_state(user_id)
 

@@ -600,6 +600,7 @@ class KairosStack(Stack):
             code=lambda_.Code.from_asset(src_path),
             handler="handlers.sms_webhook.handler",
             environment={
+                "USERS_TABLE": users_table.table_name,  # Slice 4B: Multi-user routing
                 "USER_STATE_TABLE": user_state_table.table_name,
                 "IDEMPOTENCY_TABLE": idempotency_table.table_name,
                 "MEETINGS_TABLE": meetings_table.table_name,
@@ -614,6 +615,7 @@ class KairosStack(Stack):
         )
 
         # Grant DynamoDB access
+        users_table.grant_read_data(sms_webhook_fn)  # Slice 4B: Phone routing
         user_state_table.grant_read_write_data(sms_webhook_fn)
         idempotency_table.grant_read_write_data(sms_webhook_fn)
         meetings_table.grant_read_data(sms_webhook_fn)
